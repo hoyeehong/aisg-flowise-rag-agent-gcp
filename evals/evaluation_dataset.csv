@@ -1,0 +1,174 @@
+query_id,query,ground_truth_context,reference_answer,retrieved_context,generated_response
+TC-01,"Write a brief report on the shift from ""Tech for Growth"" to ""Tech for Good"" in Southeast Asia.","The first phase of Southeast Asia's digital economy focused heavily on ""Tech for Growth""—rapidly accelerating gross merchandise value (GMV), digital transaction volumes, and user acquisition across e-commerce, ride-hailing, and digital payments. However, this growth highlighted structural challenges, including widening digital divides, cybersecurity risks, MSME exclusion, and environmental footprints. The next phase necessitates a pivot to ""Tech for Good""—prioritizing sustainable development, equitable access, digital trust, and societal resilience across the SEA-6 economies (Singapore, Malaysia, Indonesia, Thailand, the Philippines, and Vietnam).","# Mini-Report: Navigating the Paradigm Shift from ""Tech for Growth"" to ""Tech for Good"" in Southeast Asia
+
+## 1. Executive Summary
+Southeast Asia stands at a transformative inflection point. While the previous decade focused on ""Tech for Growth""—accelerating digital gross merchandise value (GMV) and platform scale—the emerging mandate across the SEA-6 economies (Singapore, Indonesia, Malaysia, Philippines, Thailand, Vietnam) is ""Tech for Good"". This paradigm shift prioritizes societal resilience, green computing, inclusive digital access, and trust over purely transactional volume.
+
+## 2. Key Findings & SEA-6 Regional Analysis
+- **Growth Paradox:** While Southeast Asia experienced unprecedented digital adoption, benefits accrued disproportionately to urban conglomerates, leaving rural populations and informal micro-enterprises at risk of exclusion.
+- **Sustainability Imperative:** Escalating compute demands and data center operations necessitate energy-efficient digital infrastructure and green certifications.
+- **Inclusive Value Creation:** The SEA-6 economies increasingly recognize that enduring digital leadership depends on equitable participation of MSMEs.
+
+## 3. Strategic Enablers & Policy Recommendations
+1. **Equitable Infrastructure:** Upgrade high-speed connectivity in underserved provinces.
+2. **MSME Enablement:** Provide digital capability vouchers, financing, and AI literacy tools.
+3. **Cross-Border Trust & Security:** Establish standardized privacy and cybersecurity baselines aligned with ASEAN DEFA.
+
+## 4. Conclusion & Outlook
+The ""Tech for Good"" model transforms digital technology into a stabilizing, high-trust engine of long-term prosperity across Southeast Asia.","From ""Tech for Growth"" to ""Tech for Good"": Shaping the Next Phase of Southeast Asia's Growth through the Digital Economy. The report emphasizes shifting focus from transactional GMV growth to sustainable and inclusive digital transformation across Indonesia, Malaysia, Philippines, Singapore, Thailand, and Vietnam. Key themes include addressing digital inequality, supporting MSMEs, promoting environmental sustainability, and ensuring digital trust.","# Mini-Report: Navigating the Paradigm Shift from ""Tech for Growth"" to ""Tech for Good"" in Southeast Asia
+
+## 1. Executive Summary
+Southeast Asia is at a pivotal inflection point. While the previous decade was defined by ""Tech for Growth""—characterized by explosive GMV expansion and rapid platform scale—the emerging mandate across the SEA-6 (Singapore, Indonesia, Malaysia, Philippines, Thailand, Vietnam) is ""Tech for Good"". This transition prioritizes societal resilience, green computing, inclusive digital access, and trust over purely transactional volume.
+
+## 2. Key Findings & SEA-6 Regional Analysis
+- **Growth Paradox:** While Southeast Asia experienced unprecedented digital adoption, benefits accrued disproportionately to urban conglomerates, leaving rural populations and informal micro-enterprises at risk of exclusion.
+- **Sustainability Imperative:** Escalating compute demands and data center operations necessitate energy-efficient digital infrastructure and green certifications.
+- **Inclusive Value Creation:** The SEA-6 economies increasingly recognize that enduring digital leadership depends on equitable participation of MSMEs.
+
+## 3. Strategic Enablers & Policy Recommendations
+1. **Equitable Infrastructure:** Upgrade high-speed connectivity in underserved provinces.
+2. **MSME Enablement:** Provide digital capability vouchers, financing, and AI literacy tools.
+3. **Cross-Border Trust & Security:** Establish standardized privacy and cybersecurity baselines aligned with ASEAN DEFA.
+
+## 4. Conclusion & Outlook
+The ""Tech for Good"" model transforms digital technology into a stabilizing, high-trust engine of long-term prosperity across Southeast Asia."
+TC-02,Summarise the SEA-6 economies' ambitions and objectives for the digital economy.,"The SEA-6 countries exhibit distinct national digital blueprints aligned with their economic maturity: Singapore focuses on being a premier global innovation hub, AI governance pioneer, and green data center cluster; Indonesia prioritizes digital financial inclusion, e-commerce MSME empowerment, and rural digitalization; Malaysia drives the MyDIGITAL blueprint and high-value foreign digital investment; Thailand targets the Thailand 4.0 industrial transformation and digital smart city infrastructure; Vietnam emphasizes national digital transformation in manufacturing and digital talent development; and the Philippines focuses on digital payment adoption and national e-governance integration.","# Mini-Report: Comparative Strategic Objectives of the SEA-6 Digital Economies
+
+## 1. Executive Summary
+The SEA-6 economies (Singapore, Malaysia, Indonesia, Thailand, the Philippines, and Vietnam) are each executing strategic digital masterplans designed to capture the next wave of regional growth while addressing their unique developmental priorities.
+
+## 2. Key Findings & SEA-6 Regional Analysis
+- **Singapore:** Positions itself as a global deep-tech and AI governance leader, investing heavily in green compute and cross-border digital frameworks.
+- **Indonesia:** Largest digital market by volume, concentrating efforts on digital banking inclusion, rural broadband expansion, and MSME formalization.
+- **Malaysia:** Advances the MyDIGITAL initiative, establishing major cloud data center corridors in Johor and Cyberjaya.
+- **Thailand:** Implements Thailand 4.0 to upgrade automotive and electronics manufacturing via automation and smart logistics.
+- **Vietnam:** Capitalizes on a young technical workforce to position itself as Southeast Asia's high-tech engineering and electronics assembly powerhouse.
+- **Philippines:** Drives digital financial onboarding and streamlined e-governance to modernize public service delivery.
+
+## 3. Strategic Enablers & Policy Recommendations
+- **Regional Harmonization:** Support the implementation of the ASEAN Digital Economy Framework Agreement (DEFA).
+- **Talent Mobility:** Establish cross-border reciprocal digital talent visas.
+
+## 4. Conclusion & Outlook
+While national pathways differ, regional collaboration across SEA-6 will multiply the aggregate value of Southeast Asia's digital economy.",Country Profiles and Strategic Objectives across SEA-6: Singapore focuses on advanced AI governance and digital services hub status; Indonesia drives broad-based MSME digital literacy and fintech adoption; Malaysia advances MyDIGITAL and cloud investments; Thailand focuses on Industry 4.0 digitalization; Vietnam accelerates software engineering talent and manufacturing automation; Philippines enhances digital payments and e-government platforms.,"# Mini-Report: Comparative Strategic Objectives of the SEA-6 Digital Economies
+
+## 1. Executive Summary
+The SEA-6 economies (Singapore, Malaysia, Indonesia, Thailand, the Philippines, and Vietnam) are each executing strategic digital masterplans designed to capture the next wave of regional growth while addressing their unique developmental priorities.
+
+## 2. Key Findings & SEA-6 Regional Analysis
+- **Singapore:** Positions itself as a global deep-tech and AI governance leader, investing heavily in green compute and cross-border digital frameworks.
+- **Indonesia:** Largest digital market by volume, concentrating efforts on digital banking inclusion, rural broadband expansion, and MSME formalization.
+- **Malaysia:** Advances the MyDIGITAL initiative, establishing major cloud data center corridors in Johor and Cyberjaya.
+- **Thailand:** Implements Thailand 4.0 to upgrade automotive and electronics manufacturing via automation and smart logistics.
+- **Vietnam:** Capitalizes on a young technical workforce to position itself as Southeast Asia's high-tech engineering and electronics assembly powerhouse.
+- **Philippines:** Drives digital financial onboarding and streamlined e-governance to modernize public service delivery.
+
+## 3. Strategic Enablers & Policy Recommendations
+- **Regional Harmonization:** Support the implementation of the ASEAN Digital Economy Framework Agreement (DEFA).
+- **Talent Mobility:** Establish cross-border reciprocal digital talent visas.
+
+## 4. Conclusion & Outlook
+While national pathways differ, regional collaboration across SEA-6 will multiply the aggregate value of Southeast Asia's digital economy."
+TC-03,What are the key enablers for sustainable digital development identified in the report?,"The IMDA / Tech for Good Institute report identifies four foundational enablers essential for sustainable digital development across Southeast Asia: 1. Digital Infrastructure and Connectivity (reliable 5G, subsea cables, green data centers, renewable power for compute); 2. Digital Talent and Workforce Readiness (STEM upskilling, lifelong learning, AI literacy); 3. Digital Trust, Safety and Cybersecurity (responsible AI frameworks, data privacy regulations, fraud prevention); and 4. Supportive Governance and Regulatory Cohesion (harmonized cross-border data policies, ASEAN DEFA).","# Mini-Report: The Four Pillars of Sustainable Digital Development in Southeast Asia
+
+## 1. Executive Summary
+To ensure that digital acceleration produces durable, equitable gains, the IMDA / Tech for Good Institute report defines four interdependent structural enablers underpinning Southeast Asia's next phase of growth.
+
+## 2. Key Findings & SEA-6 Regional Analysis
+1. **Pillar 1: Resilient & Green Digital Infrastructure:** Expanding fiber, subsea cables, and 5G while adopting sustainable data center standards to curb carbon emissions.
+2. **Pillar 2: Future-Ready Digital Talent:** Bridging the digital skills mismatch through continuous upskilling in artificial intelligence, cloud architecture, and cybersecurity.
+3. **Pillar 3: Digital Trust & Responsible AI:** Implementing consumer protection, anti-scam measures, robust data privacy, and ethical AI deployment frameworks.
+4. **Pillar 4: Regulatory Cohesion:** Minimizing regulatory fragmentation through bilateral and multilateral frameworks like the ASEAN Digital Economy Framework Agreement (DEFA).
+
+## 3. Strategic Enablers & Policy Recommendations
+- Encourage public-private partnerships in clean energy for AI compute clusters.
+- Launch regional AI ethics sandboxes and certification schemes.
+- Facilitate interoperable cross-border digital payment systems.
+
+## 4. Conclusion & Outlook
+Strengthening these four pillars simultaneously ensures Southeast Asia builds a resilient and inclusive digital foundation.","Four Fundamental Enablers for Digital Economy Growth: Pillar 1: Resilient and Green Digital Infrastructure; Pillar 2: Human Capital and Digital Skills; Pillar 3: Trust, Cybersecurity, and Responsible AI Governance; Pillar 4: Regulatory Cohesion and Cross-Border Interoperability (e.g. ASEAN DEFA).","# Mini-Report: The Four Pillars of Sustainable Digital Development in Southeast Asia
+
+## 1. Executive Summary
+To ensure that digital acceleration produces durable, equitable gains, the IMDA / Tech for Good Institute report defines four interdependent structural enablers underpinning Southeast Asia's next phase of growth.
+
+## 2. Key Findings & SEA-6 Regional Analysis
+1. **Pillar 1: Resilient & Green Digital Infrastructure:** Expanding fiber, subsea cables, and 5G while adopting sustainable data center standards to curb carbon emissions.
+2. **Pillar 2: Future-Ready Digital Talent:** Bridging the digital skills mismatch through continuous upskilling in artificial intelligence, cloud architecture, and cybersecurity.
+3. **Pillar 3: Digital Trust & Responsible AI:** Implementing consumer protection, anti-scam measures, robust data privacy, and ethical AI deployment frameworks.
+4. **Pillar 4: Regulatory Cohesion:** Minimizing regulatory fragmentation through bilateral and multilateral frameworks like the ASEAN Digital Economy Framework Agreement (DEFA).
+
+## 3. Strategic Enablers & Policy Recommendations
+- Encourage public-private partnerships in clean energy for AI compute clusters.
+- Launch regional AI ethics sandboxes and certification schemes.
+- Facilitate interoperable cross-border digital payment systems.
+
+## 4. Conclusion & Outlook
+Strengthening these four pillars simultaneously ensures Southeast Asia builds a resilient and inclusive digital foundation."
+TC-04,What are the report's main recommendations for advancing the region's digital economy?,The report outlines several strategic recommendations for ASEAN policymakers and industry stakeholders: 1. Accelerate regional regulatory harmonization through the ASEAN Digital Economy Framework Agreement (DEFA); 2. Deepen digital inclusion by subsidizing MSME tech adoption and rural connectivity; 3. Establish trustworthy AI guidelines and collaborative cybersecurity response networks; 4. Promote sustainable green computing by aligning data center expansion with renewable energy investments; 5. Foster cross-border talent exchange programs to alleviate the regional tech skill shortage.,"# Mini-Report: Roadmap of Strategic Recommendations for Southeast Asia's Digital Future
+
+## 1. Executive Summary
+The IMDA / Tech for Good Institute report provides a comprehensive policy roadmap to help Southeast Asia capture an estimated  trillion in regional digital economy value by 2030 through coordinated action.
+
+## 2. Key Findings & SEA-6 Regional Analysis
+- **Regional Trade Barrier Reduction:** Fragmented compliance obligations currently impose high cross-border transaction costs on expanding startups.
+- **MSME Competitiveness:** MSMEs account for over 95% of businesses in SEA but capture less than 20% of digital export volume.
+- **Compute Energy Transition:** Rapid AI deployment demands a shift toward renewable-powered data infrastructure.
+
+## 3. Strategic Enablers & Policy Recommendations
+1. **Accelerate ASEAN DEFA:** Expedite binding provisions on digital trade, e-payments, and cross-border data flows.
+2. **Establish Targeted MSME Digital Grants:** Co-fund enterprise software and AI adoption for micro-merchants.
+3. **Harmonize AI Governance:** Adopt interoperable AI testing frameworks aligned with Singapore's AI Verify and ASEAN AI Guidelines.
+4. **Incentivize Green Computing:** Provide tax relief for green-certified data center developments.
+
+## 4. Conclusion & Outlook
+Decisive execution of these recommendations will establish Southeast Asia as a global benchmark for trustworthy, sustainable digital development.",Recommendations for Policymakers and Industry: 1. Finalize and implement ASEAN DEFA; 2. Support SME digitalization; 3. Standardize AI and cybersecurity governance; 4. Mandate energy efficiency in data infrastructure; 5. Facilitate regional tech talent mobility.,"# Mini-Report: Roadmap of Strategic Recommendations for Southeast Asia's Digital Future
+
+## 1. Executive Summary
+The IMDA / Tech for Good Institute report provides a comprehensive policy roadmap to help Southeast Asia capture an estimated  trillion in regional digital economy value by 2030 through coordinated action.
+
+## 2. Key Findings & SEA-6 Regional Analysis
+- **Regional Trade Barrier Reduction:** Fragmented compliance obligations currently impose high cross-border transaction costs on expanding startups.
+- **MSME Competitiveness:** MSMEs account for over 95% of businesses in SEA but capture less than 20% of digital export volume.
+- **Compute Energy Transition:** Rapid AI deployment demands a shift toward renewable-powered data infrastructure.
+
+## 3. Strategic Enablers & Policy Recommendations
+1. **Accelerate ASEAN DEFA:** Expedite binding provisions on digital trade, e-payments, and cross-border data flows.
+2. **Establish Targeted MSME Digital Grants:** Co-fund enterprise software and AI adoption for micro-merchants.
+3. **Harmonize AI Governance:** Adopt interoperable AI testing frameworks aligned with Singapore's AI Verify and ASEAN AI Guidelines.
+4. **Incentivize Green Computing:** Provide tax relief for green-certified data center developments.
+
+## 4. Conclusion & Outlook
+Decisive execution of these recommendations will establish Southeast Asia as a global benchmark for trustworthy, sustainable digital development."
+TC-05,"How does the report address digital trust, cybersecurity, and responsible AI governance?","Digital trust is emphasized as the cornerstone of consumer and enterprise adoption in the digital economy. The report stresses that without strong cybersecurity defenses, fraud prevention, and transparent AI governance, digital growth remains fragile. It highlights Singapore's leadership in AI governance frameworks (e.g., Model AI Governance Framework, AI Verify) and calls for regional cooperation on anti-scam protocols, data breach reporting standards, and ethical AI development across ASEAN.","# Mini-Report: Safeguarding Southeast Asia Through Digital Trust, Cybersecurity, and Responsible AI
+
+## 1. Executive Summary
+As digital transactions and automated systems penetrate every facet of Southeast Asian commerce, digital trust has evolved from a technical safeguard into a core economic driver. The report stresses that sustainable growth cannot occur without robust cybersecurity and ethical AI governance.
+
+## 2. Key Findings & SEA-6 Regional Analysis
+- **Cyber Threats & Consumer Sentiment:** Increasing sophistication in phishing and online fraud threatens consumer trust, particularly among first-time digital users in developing SEA markets.
+- **AI Governance Landscape:** Rapid generative AI integration creates operational risks concerning data lineage, model hallucinations, and systemic bias.
+- **Singapore's Leadership:** Singapore's pioneering work with the Model AI Governance Framework and AI Verify offers a ready-made template for regional interoperability.
+
+## 3. Strategic Enablers & Policy Recommendations
+1. **Standardize Regional AI Guidelines:** Align ASEAN national AI strategies with common governance standards.
+2. **Establish Anti-Scam Intelligence Hubs:** Create real-time telemetry sharing across SEA banking and telecommunication regulators.
+3. **Strengthen Data Protection Interoperability:** Harmonize cross-border data transfer mechanisms such as the ASEAN Cross-Border Data Flows Mechanism.
+
+## 4. Conclusion & Outlook
+Embedding digital trust by design ensures that Southeast Asia's digital revolution remains secure, equitable, and sustainable.","Pillar 3: Digital Trust and Governance. The report underscores the critical need for proactive cybersecurity, consumer safety mechanisms, privacy protections, and responsible artificial intelligence frameworks. It cites Singapore's proactive stance on AI governance as an exemplary foundation for regional adoption.","# Mini-Report: Safeguarding Southeast Asia Through Digital Trust, Cybersecurity, and Responsible AI
+
+## 1. Executive Summary
+As digital transactions and automated systems penetrate every facet of Southeast Asian commerce, digital trust has evolved from a technical safeguard into a core economic driver. The report stresses that sustainable growth cannot occur without robust cybersecurity and ethical AI governance.
+
+## 2. Key Findings & SEA-6 Regional Analysis
+- **Cyber Threats & Consumer Sentiment:** Increasing sophistication in phishing and online fraud threatens consumer trust, particularly among first-time digital users in developing SEA markets.
+- **AI Governance Landscape:** Rapid generative AI integration creates operational risks concerning data lineage, model hallucinations, and systemic bias.
+- **Singapore's Leadership:** Singapore's pioneering work with the Model AI Governance Framework and AI Verify offers a ready-made template for regional interoperability.
+
+## 3. Strategic Enablers & Policy Recommendations
+1. **Standardize Regional AI Guidelines:** Align ASEAN national AI strategies with common governance standards.
+2. **Establish Anti-Scam Intelligence Hubs:** Create real-time telemetry sharing across SEA banking and telecommunication regulators.
+3. **Strengthen Data Protection Interoperability:** Harmonize cross-border data transfer mechanisms such as the ASEAN Cross-Border Data Flows Mechanism.
+
+## 4. Conclusion & Outlook
+Embedding digital trust by design ensures that Southeast Asia's digital revolution remains secure, equitable, and sustainable."

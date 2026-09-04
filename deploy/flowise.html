@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IMDA SEA Digital Economy Report Agent</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background-color: #f8fafc;
+        }
+        .header {
+            background-color: #0f172a;
+            color: #ffffff;
+            padding: 16px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .header h1 {
+            font-size: 1.25rem;
+            margin: 0;
+            font-weight: 600;
+        }
+        .header span {
+            font-size: 0.85rem;
+            background: #2563eb;
+            padding: 4px 10px;
+            border-radius: 9999px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>📊 IMDA SEA Digital Economy Research & Report Agent</h1>
+        <span>Live Cloud Run</span>
+    </div>
+
+    <!-- Flowise Full Page Embed (Module 4.3 Pattern) -->
+    <flowise-fullchatbot></flowise-fullchatbot>
+    <script type="module">
+        import Chatbot from "https://cdn.jsdelivr.net/npm/flowise-embed/dist/web.js"
+        Chatbot.initFull({
+            chatflowid: "REPLACE_WITH_YOUR_CHATFLOW_ID", // Copy your chatflow ID from Flowise canvas
+            apiHost: "https://YOUR_CLOUD_RUN_SERVICE_URL", // Replace with your live Cloud Run URL or http://localhost:3000
+            theme: {
+                button: {
+                    backgroundColor: "#2563eb",
+                    right: 20,
+                    bottom: 20,
+                    size: "medium",
+                    iconColor: "white",
+                },
+                chatWindow: {
+                    welcomeMessage: "Hello! I am your AI Policy Research Specialist for Southeast Asia's Digital Economy (SEA-6). Ask me any question or request a structured policy brief on the IMDA report!",
+                    backgroundColor: "#ffffff",
+                    height: 700,
+                    width: 450,
+                    fontSize: 16,
+                    botMessage: {
+                        backgroundColor: "#f1f5f9",
+                        textColor: "#0f172a",
+                        showAvatar: true,
+                        avatarSrc: "https://raw.githubusercontent.com/zahidkhawaja/langchain-chat-nextjs/main/public/parroticon.png",
+                    },
+                    userMessage: {
+                        backgroundColor: "#2563eb",
+                        textColor: "#ffffff",
+                        showAvatar: true,
+                    },
+                    textInput: {
+                        placeholder: "Type your query on SEA digital economy...",
+                        backgroundColor: "#ffffff",
+                        textColor: "#0f172a",
+                        sendButtonColor: "#2563eb",
+                    }
+                }
+            }
+        })
+    </script>
+</body>
+</html>

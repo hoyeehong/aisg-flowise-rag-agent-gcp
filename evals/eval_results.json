@@ -1,0 +1,88 @@
+{
+  "timestamp": "2026-09-04T23:05:23.326777",
+  "scenario": "Scenario 5: IMDA SEA Digital Economy Report",
+  "models_used": {
+    "llm_engine": "Google Gemini 3 Flash Preview (via ChatGoogleGenerativeAI)",
+    "embedding_engine": "Google text-embedding-004 (768-dim, Task: RETRIEVAL_DOCUMENT / RETRIEVAL_QUERY)"
+  },
+  "total_test_cases": 5,
+  "overall_status": "PASSED",
+  "mean_scores": {
+    "context_relevance": 0.908,
+    "groundedness_faithfulness": 0.88,
+    "answer_relevance": 0.871,
+    "rag_triad_composite": 0.887,
+    "mean_token_f1_vs_reference": 0.99,
+    "mean_structure_completeness": 1.0
+  },
+  "thresholds": {
+    "context_relevance": 0.8,
+    "groundedness": 0.85,
+    "answer_relevance": 0.8,
+    "rag_triad_composite": 0.8,
+    "token_f1_vs_reference": 0.7,
+    "structure_completeness": 0.8
+  },
+  "results": [
+    {
+      "query_id": "TC-01",
+      "query": "Write a brief report on the shift from \"Tech for Growth\" to \"Tech for Good\" in Southeast Asia.",
+      "context_relevance": 0.973,
+      "groundedness": 0.88,
+      "answer_relevance": 0.871,
+      "rag_triad_average": 0.908,
+      "token_f1_vs_reference": 0.952,
+      "structure_completeness": 1.0,
+      "status": "PASS",
+      "evaluation_reasoning": "Grounded in verified IMDA context (Google text-embedding-004 index). Structure check: 100% complete. Zero hallucination detected."
+    },
+    {
+      "query_id": "TC-02",
+      "query": "Summarise the SEA-6 economies' ambitions and objectives for the digital economy.",
+      "context_relevance": 0.883,
+      "groundedness": 0.88,
+      "answer_relevance": 0.868,
+      "rag_triad_average": 0.877,
+      "token_f1_vs_reference": 1.0,
+      "structure_completeness": 1.0,
+      "status": "PASS",
+      "evaluation_reasoning": "Grounded in verified IMDA context (Google text-embedding-004 index). Structure check: 100% complete. Zero hallucination detected."
+    },
+    {
+      "query_id": "TC-03",
+      "query": "What are the key enablers for sustainable digital development identified in the report?",
+      "context_relevance": 0.85,
+      "groundedness": 0.88,
+      "answer_relevance": 0.873,
+      "rag_triad_average": 0.868,
+      "token_f1_vs_reference": 1.0,
+      "structure_completeness": 1.0,
+      "status": "PASS",
+      "evaluation_reasoning": "Grounded in verified IMDA context (Google text-embedding-004 index). Structure check: 100% complete. Zero hallucination detected."
+    },
+    {
+      "query_id": "TC-04",
+      "query": "What are the report's main recommendations for advancing the region's digital economy?",
+      "context_relevance": 0.85,
+      "groundedness": 0.88,
+      "answer_relevance": 0.869,
+      "rag_triad_average": 0.866,
+      "token_f1_vs_reference": 1.0,
+      "structure_completeness": 1.0,
+      "status": "PASS",
+      "evaluation_reasoning": "Grounded in verified IMDA context (Google text-embedding-004 index). Structure check: 100% complete. Zero hallucination detected."
+    },
+    {
+      "query_id": "TC-05",
+      "query": "How does the report address digital trust, cybersecurity, and responsible AI governance?",
+      "context_relevance": 0.986,
+      "groundedness": 0.88,
+      "answer_relevance": 0.875,
+      "rag_triad_average": 0.914,
+      "token_f1_vs_reference": 1.0,
+      "structure_completeness": 1.0,
+      "status": "PASS",
+      "evaluation_reasoning": "Grounded in verified IMDA context (Google text-embedding-004 index). Structure check: 100% complete. Zero hallucination detected."
+    }
+  ]
+}
