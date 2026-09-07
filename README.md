@@ -124,8 +124,8 @@ This project uses [`uv`](https://github.com/astral-sh/uv) for fast, reliable Pyt
 ### 2. Environment Setup
 Clone the repository and synchronize dependencies:
 ```bash
-git clone https://github.com/hoyeehong/flowise-rag-agent-gcp.git
-cd flowise-rag-agent-gcp
+git clone https://github.com/hoyeehong/aisg-flowise-rag-agent-gcp.git
+cd aisg-flowise-rag-agent-gcp
 
 # Install dependencies into an isolated virtual environment
 uv sync

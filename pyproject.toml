@@ -1,5 +1,5 @@
 [project]
-name = "flowise-rag-agent-gcp"
+name = "aisg-flowise-rag-agent-gcp"
 version = "0.1.0"
 description = "Multi-Agent RAG System and Evaluation Suite for IMDA Digital Economy Analysis using Flowise, Google Gemini, and GCP Cloud Run"
 readme = "README.md"
