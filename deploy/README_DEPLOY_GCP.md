@@ -75,7 +75,7 @@ The script automatically:
 
 3. **Import Scenario 5 Workflow:**
    * Go to **Agentflows** $\rightarrow$ Click **Add New** $\rightarrow$ Click **Settings (Gear Icon)** $\rightarrow$ **Load / Import Chatflow**.
-   * Upload [`scenario_5_imda_digital_economy_agentflow3.json`](../scenario_5_imda_digital_economy_agentflow3.json).
+   * Upload [`flowise_scenario_5_workflow.json`](../flowise_scenario_5_workflow.json).
 
 4. **Initialize Document Store:**
    * Go to **Document Stores** $\rightarrow$ Click **Add New** $\rightarrow$ Name: `imda_sea_digital_economy_report`.

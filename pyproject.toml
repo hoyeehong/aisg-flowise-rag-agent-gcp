@@ -1,0 +1,14 @@
+[project]
+name = "flowise-rag-agent-gcp"
+version = "0.1.0"
+description = "Multi-Agent RAG System and Evaluation Suite for IMDA Digital Economy Analysis using Flowise, Google Gemini, and GCP Cloud Run"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "jupyter>=1.1.1",
+    "numpy>=2.2.6",
+    "pandas>=2.3.3",
+    "python-dotenv>=1.2.3",
+    "tabulate>=0.10.0",
+]

@@ -1,192 +1,233 @@
-# Digital Economy Research & Report Agent (Agentic Workflow with Human-in-the-Loop)
+# Autonomous Multi-Agent RAG System & Evaluation Suite
+### Digital Economy Policy Research with Human-in-the-Loop (HITL)
 
-**Learner:** Ho Yee Hong
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python: >=3.10](https://img.shields.io/badge/Python->=3.10-blue.svg)](https://www.python.org/)
+[![Package Manager: uv](https://img.shields.io/badge/managed_by-uv-DE5FE9.svg)](https://github.com/astral-sh/uv)
+[![Orchestration: Flowise](https://img.shields.io/badge/Flowise-Agentflow_v2-black)](https://flowiseai.com/)
+[![Observability: Arize AI](https://img.shields.io/badge/Observability-Arize_AI-0A58CA)](https://arize.com/)
+[![LLM: Google Gemini](https://img.shields.io/badge/Google_Gemini-Flash_Preview-4285F4)](https://aistudio.google.com/)
+[![Vector: text--embedding--004](https://img.shields.io/badge/Embedding-text--embedding--004-34A853)](https://ai.google.dev/)
+[![Cloud: GCP Cloud Run](https://img.shields.io/badge/Deploy-GCP_Cloud_Run-orange)](https://cloud.google.com/run)
 
-**Scenario:** 5 — *From "Tech for Growth" to "Tech for Good": Shaping the Next Phase of Southeast Asia's Growth through the Digital Economy* (IMDA / Tech for Good Institute)
+An end-to-end, production-oriented GenAI application demonstrating a **specialized multi-agent architecture** with **Document Store RAG**, **Human-in-the-Loop (HITL) iterative governance**, **live Arize AI observability & tracing**, **RAG Triad automated evaluation**, and **automated zero-secrets deployment to Google Cloud Run**.
 
-**Build Type:** Multi-Agent Agentic Workflow (Flowise Agentflow v2) with Document Store RAG & Human-in-the-Loop (HITL)  
-**LLM Engine:** `Google Gemini 3 Flash Preview` (`chatGoogleGenerativeAI`)  
-**Embedding Engine:** `Google text-embedding-004` (768-dim, Asymmetric Retrieval)  
-**Workflow File:** `yeehong_ho_scenario_5.json`
+Designed around the dense 50+ page policy report published by the **Infocomm Media Development Authority (IMDA)** and the **Tech for Good Institute**: *"From Tech for Growth to Tech for Good: Shaping the Next Phase of Southeast Asia’s Growth through the Digital Economy"*.
 
----
-
-## 1. Executive Summary & Scenario Rationale
-
-### Why Scenario 5?
-In Southeast Asia's rapidly maturing digital landscape, national governments and enterprises are pivoting from purely measuring Gross Merchandise Value (GMV) / digital transaction volume ("Tech for Growth") toward building sustainable, equitable, and trustworthy digital ecosystems ("Tech for Good"). 
-
-The **IMDA / Tech for Good Institute Special Report** presents dense policy frameworks, cross-border analyses across the **SEA-6 economies** (Singapore, Malaysia, Indonesia, Thailand, the Philippines, and Vietnam), and four foundational enablers (*Infrastructure, Talent, Trust/Cybersecurity, and Governance*). 
-
-Analyzing and synthesizing this 50+ page policy paper into actionable executive mini-reports requires more than simple naive Q&A:
-1. **Specialized Division of Labor:** Separation between factual, high-recall research retrieval (`Research Agent`) and coherent, structured policy synthesis (`Writer Agent`).
-2. **Enterprise Human-in-the-Loop (HITL) Governance:** Real-world think tanks and public sector agencies cannot rely on unsupervised one-shot generation. Analysts require an interactive review gate to approve, adjust emphasis, or request iterative revisions.
-3. **Multi-Turn Adaptive Feedback Loop:** Incorporating human critique dynamically through iterative looping until the report meets executive standards.
+> [!NOTE]
+> **Upstream AISG Capstone Contribution**: This repository serves as the standalone, open-source companion and full deployment/evaluation suite for the author's capstone project merged into the official AI Singapore repository: [**AISG-AIAP/LADP-Essentials (`yeehong_ho`)**](https://github.com/AISG-AIAP/LADP-Essentials/tree/main/LADPE_Project_Phase/contributions_from_learners/yeehong_ho).
 
 ---
 
-## 2. Architecture & Multi-Agent Pipeline
+## 🏛️ System Architecture
+
+<p align="center">
+  <img src="images/rag_retrieval_pipeline.png" alt="Multi-Agent RAG System Architecture with Arize AI Observability" width="100%"/>
+</p>
+
+<details>
+<summary><b>View Mermaid Diagram Source</b></summary>
+
+```mermaid
+graph TD
+    classDef startNode fill:#e1f5fe,stroke:#0288d1,stroke-width:2px;
+    classDef agentNode fill:#e8f5e9,stroke:#388e3c,stroke-width:2px;
+    classDef hitlNode fill:#fff3e0,stroke:#f57c00,stroke-width:2px;
+    classDef toolNode fill:#ede7f6,stroke:#512da8,stroke-width:2px;
+    classDef arizeNode fill:#e8eaf6,stroke:#3949ab,stroke-width:2px;
+
+    User([User Prompt / Topic]) --> Start[Start Node]:::startNode
+    Start --> ResearchAgent[Research Specialist Agent<br/>Gemini 3 Flash Preview]:::agentNode
+    
+    subgraph RAG Retrieval Pipeline
+        Store[(IMDA Document Store<br/>text-embedding-004)]:::toolNode
+        Tool[RAG Retrieval Tool]:::toolNode
+        Store <--> Tool
+    end
+    
+    ResearchAgent <--> Tool
+    ResearchAgent -->|Structured Findings| WriterAgent[Policy Writer Agent<br/>Gemini 3 Flash Preview]:::agentNode
+    
+    WriterAgent --> DraftReport[Publication-Grade Mini-Report]
+    DraftReport --> HITL{Human Review Gate<br/>HITL Governance}:::hitlNode
+    
+    HITL -->|Approved| Approved[Direct Reply / Final Report]:::startNode
+    HITL -->|Request Revision| Loop[Loop Node<br/>Feedback Memory]:::hitlNode
+    Loop -->|Iterative Critique| WriterAgent
+
+    subgraph Observability Layer (Configured in Deployed Flowise)
+        Arize[Arize AI Observability Platform<br/>OpenTelemetry / OpenInference]:::arizeNode
+        SpanTool[Span: Retrieval Similarity & Latency]:::arizeNode
+        SpanLLM[Span: Reasoning, Tokens & Cost]:::arizeNode
+        SpanHITL[Span: HITL Pause & Loop Iterations]:::arizeNode
+        
+        SpanTool --- Arize
+        SpanLLM --- Arize
+        SpanHITL --- Arize
+    end
+
+    Tool -.->|Trace Span| SpanTool
+    ResearchAgent -.->|Trace Span| SpanLLM
+    WriterAgent -.->|Trace Span| SpanLLM
+    HITL -.->|Trace Span| SpanHITL
+```
+</details>
+
+### Key Architectural Highlights
+* **Specialized Separation of Concerns:**
+  * **Research Agent:** High-recall factual retrieval across country benchmarks (Singapore, Malaysia, Indonesia, Thailand, Philippines, Vietnam) and the four structural pillars (Infrastructure, Talent, Trust/Cybersecurity, Governance).
+  * **Writer Agent:** Executive policy synthesis structured strictly into: *Executive Summary*, *Key Findings & Regional Analysis*, *Strategic Enablers & Recommendations*, and *Future Outlook*.
+* **Enterprise Human-in-the-Loop (HITL) Gate:** Prevents unchecked autonomous generation by providing an interactive review barrier where human domain experts can approve or request targeted revisions.
+* **Full-Stack Arize AI Observability:** Configured directly within the deployed Flowise interface on Google Cloud Run to stream OpenInference and OpenTelemetry traces into **Arize AI**, monitoring latency, token economics, retrieval chunk quality, and feedback iteration counts in production.
+* **Asymmetric Semantic Embeddings:** Uses Google's `text-embedding-004` with asymmetric indexing (`RETRIEVAL_DOCUMENT` vs `RETRIEVAL_QUERY`) for higher retrieval precision at 768 dimensions with 50% lower memory footprint than traditional 1536-dim vectors.
+
+---
+
+## 📂 Repository Structure
 
 ```
-                                  +-------------------------------------------------+
-                                  |             Flowise Agentflow Canvas            |
-                                  +-------------------------------------------------+
-
-                                                      +------------------------+
-                                                      | Google text-embed-004  |
-                                                      | (768-dim, Asymmetric)  |
-                                                      +-----------+------------+
-                                                                  |
-                                                                  v
-[User Query] ---> [Start Node] ---> [Research Agent] ---> [Writer Agent] ---> [Human Review Gate (HITL)]
-                                    (Gemini 3 Flash Preview)    (Gemini 3 Flash Preview)           |
-                                                                               +-------+-------+
-                                                                               |               |
-                                                             [Approved] (Output 0)    [Revise] (Output 1)
-                                                                       |                       |
-                                                                       v                       v
-                                                             [Final Outcome]        [Loop to Writer Agent]
-                                                             (Published Report)     (Max 5 iterations)
+├── deploy/
+│   ├── deploy_gcp.sh              # Production-grade deployment script for Google Cloud Run
+│   ├── env.example                # Sanitized deployment configuration template
+│   ├── flowise.html               # Lightweight embeddable chat web interface
+│   └── README_DEPLOY_GCP.md       # Comprehensive GCP infrastructure deployment guide
+├── evals/
+│   ├── run_evaluations.py         # Automated RAG Triad evaluation runner (TruLens/RAGAS methodology)
+│   ├── evaluation_dataset.json    # Benchmark dataset with queries, retrieved context & golden references
+│   ├── evaluation_dataset.csv     # Tabular version of benchmark scenarios
+│   ├── evaluation_report.md       # Generated benchmark report and scorecard
+│   └── evaluations_notebook.ipynb # Interactive Jupyter analysis notebook
+├── images/
+│   └── rag_retrieval_pipeline.png # High-resolution system architecture diagram
+├── prompts/
+│   ├── research_agent_prompt.txt  # System directives for factual extraction & country breakouts
+│   └── writer_agent_prompt.txt    # Policy writer persona, report schema & revision rules
+├── flowise_scenario_5_workflow.json # Sanitized Flowise Agentflow v2 workflow export
+├── main.py                        # Central project CLI entrypoint
+├── pyproject.toml                 # Project metadata and dependencies (PEP 518/621)
+├── uv.lock                        # Deterministic lockfile managed by uv
+├── LICENSE                        # MIT License
+└── README.md                      # Project documentation
 ```
 
-### Pipeline Component Breakdown:
-* **Start Node (`startAgentflow`):** Accepts the analyst's research topic or prompt.
-* **Research Agent (`agentAgentflow`):**
-  * Powered by **`Google Gemini 3 Flash Preview`** (temperature: `0.1`) equipped with a Flowise **Document Store RAG Tool**.
-  * Connected to Google's **`text-embedding-004`** index using asymmetric retrieval to query facts across SEA-6 country data, regional benchmarks, and the 4 structural enablers with source citations.
-* **Writer Agent (`llmAgentflow`):**
-  * Powered by **`Google Gemini 3 Flash Preview`** (temperature: `0.3`, memory: `allMessages`).
-  * Ingests both original user prompt and raw retrieved findings to synthesize a publication-grade brief structured into: **Executive Summary**, **Key Findings & Regional Analysis**, **Strategic Enablers & Policy Recommendations**, and **Conclusion**.
-* **Human Review Gate (`humanInputAgentflow`):**
-  * Pauses execution and presents the drafted report to the analyst with interactive actions:
-    * **Approve:** Passes directly to `DirectReply` for final sign-off.
-    * **Request Revision:** Captures user critique (e.g., *"Focus more on Singapore's green data center roadmap"*).
-* **Loop Node (`loopAgentflow`):**
-  * Routes human revision feedback back into the Writer Agent (up to 5 iterations) ensuring iterative refinement without manual copy-pasting.
-* **Final Outcome Node (`directReplyAgentflow`):**
-  * Delivers the approved, verified policy brief.
+---
+
+## 🚀 Quickstart Guide
+
+This project uses [`uv`](https://github.com/astral-sh/uv) for fast, reliable Python package and environment management.
+
+### 1. Prerequisites
+* Python `>= 3.10`
+* [uv](https://docs.astral.sh/uv/getting-started/installation/) installed (`curl -LsSf https://astral.sh/uv/install.sh | sh` or `brew install uv`)
+* [Flowise](https://flowiseai.com/) (Local via `npx flowise start` or Docker container)
+
+### 2. Environment Setup
+Clone the repository and synchronize dependencies:
+```bash
+git clone https://github.com/hoyeehong/flowise-rag-agent-gcp.git
+cd flowise-rag-agent-gcp
+
+# Install dependencies into an isolated virtual environment
+uv sync
+```
 
 ---
 
-## 3. Key Design Decisions
+## 🧪 Automated RAG Triad Evaluation Suite
 
-### A. Google Embedding & Vector Store Strategy (Module 2 Concepts)
-* **Embedding Model:** Google **`text-embedding-004`** (768 dimensions, cosine similarity).
-  * **Asymmetric Task Types:** Indexes document chunks using `RETRIEVAL_DOCUMENT` and transforms queries using `RETRIEVAL_QUERY`. This asymmetric mapping yields superior semantic alignment compared to symmetric embeddings.
-  * **Efficiency:** 768 dimensions provide higher retrieval accuracy on MTEB (~66.3) while using **50% less RAM/storage** than standard 1536-dim vectors.
-* **Vector Store Options:**
-  * **Production Cloud (Pinecone Serverless):** Index configured with `768` dimensions, `cosine` metric, and namespace `imda-sea-report` for isolated, persistent cloud vector search.
-  * **Local In-Memory:** Built-in Flowise in-memory store for rapid local development.
-* **Text Splitter:** `RecursiveCharacterTextSplitter` configured with:
-  * **Chunk Size:** `1,000 characters` (~200–250 tokens). Keeps section headings together with their analytical context.
-  * **Chunk Overlap:** `200 characters` (20% overlap). Maintains semantic continuity across chunk boundaries.
-* **Top-K Retrieval:** Set to `Top-K = 5` to gather broad cross-country context across all SEA-6 nations simultaneously.
+The evaluation suite implements the **RAG Triad** framework (TruLens / RAGAS standard) to rigorously score hallucination resistance, retrieval relevance, and structural completeness.
 
-### B. Google Gemini 3 Flash Preview LLM Selection (Module 1 & 3 Concepts)
-* **Sub-Second Latency & 1M Context Window:** `gemini-3-flash-preview` executes retrieval reasoning in under 500ms and eliminates "lost-in-the-middle" degradation across dense policy contexts.
-* **Multilingual SEA Competence:** Native tokenization for Southeast Asian terminology (e.g. MSME formalization in Indonesia, MyDIGITAL in Malaysia, ASEAN DEFA).
-* **Role Calibration:**
-  * **Research Agent Prompt:** Enforces strict zero-hallucination grounding with country-specific breakouts (`[Singapore]`, `[Indonesia]`, etc.).
-  * **Writer Agent Prompt:** Enforces strict markdown report taxonomy and mandates incorporating human review feedback.
-
----
-
-## 4. Challenges Faced & Resolutions
-
-| Challenge Encountered | Root Cause | Engineering Resolution |
-| :--- | :--- | :--- |
-| **Cross-Country Fact Blending** | LLM tended to conflate Malaysia's infrastructure goals with Indonesia's digital talent initiatives when asked general queries. | Added structured extraction instructions to the Research Agent prompt, mandating itemized country breakouts (e.g. `[Singapore]`, `[Indonesia]`, `[Vietnam]`). |
-| **Over-Summarization in Writer Node** | Writer agent initially generated generic high-level summaries without retaining granular statistics. | Added explicit instruction in the Writer prompt: *"Retain all quantitative metrics, dates, and initiative names from the Research Agent's output."* |
-| **State Retention during HITL Loop** | Early iterations lost user feedback context across loops. | Enabled `allMessages` conversation memory on the LLM nodes and mapped the loop handle back to the Writer node input state. |
-
----
-
-## 5. Automated Evaluation Suite & Benchmarks (Module 4.2 Aligned)
-
-A fully automated, reproducible evaluation suite is implemented in the [`evals/`](evals/) directory, adhering to the **RAG Triad** (TruLens / RAGAS) and **LLM-as-a-Judge** methodology taught in **AISG Module 4.2**:
-
-### A. RAG Triad Scorecard (Google Stack Benchmark Results)
-
-| Metric | Score | Target | Status | Description |
+### Evaluation Metrics & Rubric
+| Metric | Score | Target | Status | Assessment |
 | :--- | :---: | :---: | :---: | :--- |
-| **Context Relevance** | **0.908** | $\ge 0.80$ | `PASS` | Evaluates if retrieved chunks from the IMDA PDF (via `text-embedding-004`) are strictly relevant to the research query. |
-| **Groundedness / Faithfulness** | **0.880** | $\ge 0.85$ | `PASS` | Evaluates whether claims made by the Writer Agent (`gemini-3-flash-preview`) are fully grounded in retrieved facts (hallucination check). |
-| **Answer Relevance** | **0.871** | $\ge 0.80$ | `PASS` | Evaluates whether the generated mini-report answers the prompt and adheres to the 4-part structure. |
-| **RAG Triad Composite** | **0.887** | $\ge 0.80$ | **`PASSED`** | Harmonic composite across the RAG Triad. |
-| **Token F1 vs Reference** | **0.990** | $\ge 0.70$ | `PASS` | Lexical and semantic overlap against calibrated expert reference reports. |
-| **Structure Completeness** | **100%** | $\ge 80\%$ | `PASS` | Verifies presence of Executive Summary, Key Findings, Strategic Enablers, and Conclusion. |
+| **Context Relevance** | **0.908** | $\ge 0.80$ | `PASS` | Evaluates if retrieved text chunks from `text-embedding-004` contain strictly relevant facts. |
+| **Groundedness / Faithfulness** | **0.880** | $\ge 0.85$ | `PASS` | Evaluates whether claims made by the Writer Agent are grounded in retrieved context (Hallucination check). |
+| **Answer Relevance** | **0.871** | $\ge 0.80$ | `PASS` | Evaluates whether the generated mini-report directly addresses the user query and intent. |
+| **RAG Triad Composite** | **0.887** | $\ge 0.80$ | **`PASSED`** | Harmonic composite score across all three triad dimensions. |
+| **Token F1 vs Reference** | **0.990** | $\ge 0.70$ | `PASS` | Lexical & token overlap against calibrated expert reference reports. |
+| **Structure Completeness** | **100%** | $\ge 80\%$ | `PASS` | Validates presence of Executive Summary, Key Findings, Strategic Enablers, and Conclusion. |
 
-### B. Evaluation Assets Included
-* [`evals/run_evaluations.py`](evals/run_evaluations.py): Automated Python evaluation runner supporting Google Gemini LLM-as-a-Judge and statistical rubrics.
-* [`evals/evaluation_dataset.json`](evals/evaluation_dataset.json) & [`evals/evaluation_dataset.csv`](evals/evaluation_dataset.csv): 5 benchmark test queries with ground-truth contexts, reference answers, and model responses.
-* [`evals/evaluation_report.md`](evals/evaluation_report.md): Automatically generated markdown benchmark scorecard.
-* [`evals/evaluations_notebook.ipynb`](evals/evaluations_notebook.ipynb): Interactive Jupyter evaluation notebook.
+### Running Evaluations
 
-To run the evaluations locally:
+Run the automated evaluation runner:
 ```bash
-python evals/run_evaluations.py
+uv run python evals/run_evaluations.py
+```
+
+To run with **Google Gemini as an active LLM-as-a-Judge**:
+```bash
+export GEMINI_API_KEY="your-google-gemini-api-key"
+uv run python evals/run_evaluations.py --gemini-key $GEMINI_API_KEY
+```
+
+To explore interactively in Jupyter:
+```bash
+uv run jupyter lab evals/evaluations_notebook.ipynb
 ```
 
 ---
 
-### C. Sample Conversation Runs & Verification
+## 🔭 Observability, Tracing & Production Engineering (Arize AI)
 
-#### Query 1: *"Write a brief report on the shift from 'Tech for Growth' to 'Tech for Good' in Southeast Asia."*
-* **Research Agent Output:** Identified foundational themes: transition from volume metrics (e-commerce GMV, user adoption) to digital inclusion, sustainability, trustworthy AI, and SME resilience across ASEAN.
-* **Writer Agent Draft:** Formulated 4-part executive report detailing why the initial wave of digital growth created unintended digital divides, and how "Tech for Good" establishes sustainable long-term economic resilience.
-* **HITL Action:** *Approved by Analyst.*
+Monitoring complex agentic workflows in production requires granular visibility into node transitions, vector retrieval quality, and LLM reasoning steps.
 
-#### Query 2: *"Summarise the SEA-6 economies' ambitions and objectives for the digital economy."*
-* **Research Agent Output:** Extracted country-specific goals:
-  * **Singapore:** Global digital innovation hub, AI governance leadership, green data centers.
-  * **Indonesia:** Digital inclusion, MSME digital onboarding, rural connectivity.
-  * **Malaysia:** MyDIGITAL blueprint, digital investment acceleration.
-  * **Thailand & Vietnam:** National 4.0 strategy, digital talent development, semiconductor/manufacturing digitalization.
-  * **Philippines:** E-governance adoption, digital payments scaling.
-* **Writer Agent Draft:** Produced comparative matrix and executive narrative highlighting divergence in digital maturity and convergence under ASEAN DEFA.
-* **HITL Action:** *Approved by Analyst.*
+### Arize AI Integration via Deployed Flowise Interface
+In the production deployment on **Google Cloud Run**, observability is enabled natively via the Flowise UI (**Configuration / Settings $\rightarrow$ Analytics $\rightarrow$ Arize AI / OpenInference**):
 
-#### Query 3: *"What are the key enablers for sustainable digital development identified in the report?"*
-* **Research Agent Output:** Extracted the 4 core pillars: (1) Resilient Digital Infrastructure, (2) Digital Talent & Future-Ready Skills, (3) Digital Trust & Cybersecurity (Responsible AI & Cross-Border Data), (4) Regulatory Cohesion (ASEAN DEFA).
-* **Writer Agent Draft:** Generated structured briefing with actionable policy levers per pillar.
-* **HITL Action:** *Revision Requested: "Please expand on the Digital Trust and Responsible AI pillar."*
-* **Refined Output:** Writer Agent re-generated Section 3 with expanded focus on Model AI Governance Framework and cross-border data alignment across ASEAN.
+* **OpenTelemetry & OpenInference Telemetry:** Every execution event emits standardized traces into the Arize platform:
+  * **Span 1 (`startAgentflow`):** Prompt ingestion, session metadata, and user query timestamp.
+  * **Span 2 (`agentAgentflow` / RAG Tool):** Embedding conversion with `text-embedding-004`, top-K retrieved chunk similarity scores, retrieved context payload, and retrieval latency.
+  * **Span 3 (`llmAgentflow`):** Writer Agent reasoning step, prompt/completion token consumption, temperature parameters, and execution latency.
+  * **Span 4 (`humanInputAgentflow` & `loopAgentflow`):** Human-in-the-Loop approval/revision events, user critique payload, and multi-turn iteration counters.
+
+### Production Observability Capabilities with Arize:
+1. **RAG Retrieval Quality & Semantic Drift:** Continuously inspects whether retrieved context chunks remain tightly aligned with policy queries over time.
+2. **Multi-Agent Cost & Token Tracking:** Monitors token consumption broken down by agent role (Research vs Writer) across successive HITL feedback loops.
+3. **Continuous Groundedness & Hallucination Guardrails:** Correlates production trace inputs against generated answers to identify hallucinated citations or ungrounded claims in real time.
 
 ---
 
-## 6. How to Run & Verify in Flowise (Google Option A + Pinecone / In-Memory)
+## ☁️ Cloud Deployment (Google Cloud Run)
 
-1. Open **Flowise** (`npx flowise start` or local Docker at `http://localhost:3000`).
-2. **Create Credentials in Flowise:**
-   * **Google API:** Go to **Credentials** $\rightarrow$ **Add Credential** $\rightarrow$ **Google Generative AI API** (Enter API Key from [Google AI Studio](https://aistudio.google.com/)).
-   * **Pinecone API (Optional for Cloud Vector Store):** Go to **Credentials** $\rightarrow$ **Add Credential** $\rightarrow$ **Pinecone API** (Enter API Key from [Pinecone Console](https://app.pinecone.io/)).
-3. **Configure Document Store:**
-   * Go to **Document Stores** $\rightarrow$ **Add New** $\rightarrow$ Name: `imda_sea_digital_economy_report`.
-   * **1. Document Loader:** Select **PDF File Loader** $\rightarrow$ Upload [`imda_report.pdf`](imda_report.pdf).
-   * **2. Text Splitter:** Select **Recursive Character Text Splitter** (`Chunk Size: 1000`, `Chunk Overlap: 200`).
-   * **3. Embeddings:** Select **Google GenerativeAI Embeddings** (`text-embedding-004`) $\rightarrow$ Connect your Google API Key.
-   * **4. Vector Store:**
-     * *Option A (Pinecone Cloud):* Select **Pinecone** $\rightarrow$ Connect Pinecone API Key credential $\rightarrow$ Index: `ladp-capstone` $\rightarrow$ Namespace: `imda-sea-report`.
-     * *Option B (Local Development):* Select **In-Memory** (or **Memory Vector Store**).
-   * **5. Record Manager:** Select **SQLite Record Manager** (or **Default / None**).
-   * Click **Save & Upsert Chunk** (wait for the green success notification).
-4. **Import the Agentflow Workflow:**
-   * Go to **Agentflows** $\rightarrow$ Click **Add New** $\rightarrow$ **Settings (Gear Icon)** $\rightarrow$ **Load / Import Chatflow**.
-   * Select [`scenario_5_imda_digital_economy_agentflow3.json`](scenario_5_imda_digital_economy_agentflow3.json).
-   * Confirm the `Research Agent` and `Writer Agent` nodes are connected to your **Google Generative AI** credential.
-   * Click **Save** and open the chat window to test.
+The [`deploy/`](deploy/) directory provides a production deployment setup for Google Cloud Platform (`asia-southeast1`):
 
----
+* **Zero Plaintext Secrets:** Model API keys and admin credentials are injected at container startup via **Google Secret Manager**.
+* **Persistent Storage:** Cloud Run integrates a **Google Cloud Storage (GCS) FUSE** mount (`gs://flowise-data-<PROJECT_ID>`) to persist Flowise SQLite databases, sessions, and document stores across restarts.
+* **Cost Efficiency:** Automated scale-to-zero (`min-instances: 0`, `max-instances: 5`).
 
-## 7. Cloud Deployment to Google Cloud Run (Module 4.3 Aligned)
-
-For production deployment to Google Cloud Platform (Singapore region `asia-southeast1`) with **Cloud Storage (GCS FUSE)** persistence and **Google Secret Manager**, an automated deployment script and guide are available:
-
-* **Deployment Script:** [`deploy/deploy_gcp.sh`](deploy/deploy_gcp.sh)
-* **Configuration Template:** [`deploy/env.example`](deploy/env.example)
-* **Full Deployment Guide:** [`deploy/README_DEPLOY_GCP.md`](deploy/README_DEPLOY_GCP.md)
-
-### Quick Deploy Command:
+### Deploy in One Command:
 ```bash
-./deploy/deploy_gcp.sh
+# Optional: copy configuration template
+cp deploy/env.example deploy/.env
+
+# Execute deployment
+bash deploy/deploy_gcp.sh
 ```
+
+For complete step-by-step deployment and operational management instructions, see [`deploy/README_DEPLOY_GCP.md`](deploy/README_DEPLOY_GCP.md).
+
+---
+
+## ⚙️ How to Import into Flowise
+
+1. Launch Flowise locally (`npx flowise start`) or on Cloud Run.
+2. Under **Credentials**, add your **Google Generative AI API** key.
+3. Under **Document Stores**, create `imda_sea_digital_economy_report`:
+   * Loader: **PDF File Loader** $\rightarrow$ upload `imda_report.pdf`
+   * Text Splitter: **Recursive Character Text Splitter** (`Chunk: 1000`, `Overlap: 200`)
+   * Embeddings: **Google GenerativeAI Embeddings** (`text-embedding-004`)
+   * Vector Store: **In-Memory** or **Pinecone Cloud**
+4. Under **Agentflows**, click **Add New** $\rightarrow$ **Settings** $\rightarrow$ **Load / Import Chatflow** $\rightarrow$ Select [`flowise_scenario_5_workflow.json`](flowise_scenario_5_workflow.json).
+5. Click **Save** and test in the chat canvas.
+
+---
+
+## 📜 Acknowledgements & References
+* **AI Singapore (AISG):** Developed for the *LLM Application Developer Programme (Essentials)* (LADP-E) Capstone Project. Official learner submission merged upstream in [**AISG-AIAP/LADP-Essentials (`yeehong_ho`)**](https://github.com/AISG-AIAP/LADP-Essentials/tree/main/LADPE_Project_Phase/contributions_from_learners/yeehong_ho).
+* **IMDA & Tech for Good Institute:** Source policy report: *"From Tech for Growth to Tech for Good: Shaping the Next Phase of Southeast Asia’s Growth through the Digital Economy"*.
+* **Flowise AI:** Low-code/no-code visual framework for LangChain and LangGraph agentic workflows.
+
+---
+
+## 📄 License
+This project is licensed under the [MIT License](LICENSE).
