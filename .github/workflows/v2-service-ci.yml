@@ -22,6 +22,10 @@ defaults:
 
 concurrency:
   group: v2-ci-${{ github.ref }}
+  # Superseded PR runs are worth cancelling. The publish job opts out below: it pushes
+  # an image and then signs it, so cancelling between those two steps leaves an
+  # unsigned image in the registry -- the exact supply-chain gap the job exists to
+  # close. Observed once, on the first main run of this workflow.
   cancel-in-progress: true
 
 jobs:
@@ -273,6 +277,14 @@ jobs:
     timeout-minutes: 20
     needs: [quality, optional-deps, evals, infra, image]
 
+    # Its own group, and never cancelled. push -> sign -> attest -> verify is not
+    # atomic: interrupting it publishes an image whose signature was never written or
+    # never verified, which is worse than not publishing at all because downstream
+    # verification would then fail on an image that looks legitimate.
+    concurrency:
+      group: v2-publish-${{ github.ref }}
+      cancel-in-progress: false
+
     permissions:
       contents: read
       packages: write
@@ -327,6 +339,21 @@ jobs:
               -o spdx-json=/out/sbom.spdx.json -q
           cosign attest --yes --predicate sbom.spdx.json \
             --type spdxjson "${IMAGE}@${DIGEST}"
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+
+      - name: Confirm the signature is discoverable in the registry
+        # cosign sign exiting 0 means it uploaded; this confirms the .sig tag is
+        # actually readable, which is what a downstream verifier depends on.
+        run: |
+          sig_tag="$(echo "${DIGEST}" | tr ':' '-').sig"
+          for i in $(seq 1 12); do
+            docker manifest inspect "${IMAGE}:${sig_tag}" >/dev/null 2>&1 && {
+              echo "signature tag present: ${IMAGE}:${sig_tag}"; exit 0; }
+            sleep 5
+          done
+          echo "::error::signature tag ${sig_tag} not readable after signing"
+          exit 1
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
 
