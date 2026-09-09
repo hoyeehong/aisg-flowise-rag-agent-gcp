@@ -9,7 +9,9 @@ written to logs or the /metrics surface.
 
 from __future__ import annotations
 
-from pydantic import Field, SecretStr, field_validator
+from pathlib import Path
+
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .gateway import ModelSpec
@@ -20,19 +22,34 @@ GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 
 DEFAULT_MODEL_CHAIN = "openai/gpt-oss-20b,llama-3.3-70b-versatile"
 
+# Anchor the .env lookup to the service root, not the process working directory, so
+# `uvicorn` started from the repo root behaves the same as from this directory. A .env
+# in the CWD is read second and therefore wins, which keeps ad-hoc overrides working.
+_SERVICE_ROOT = Path(__file__).resolve().parent.parent
+
 
 class Settings(BaseSettings):
     """Service settings, populated from environment variables."""
 
     model_config = SettingsConfigDict(
-        env_prefix="AGENT_", env_file=".env", extra="ignore", frozen=True
+        env_prefix="AGENT_",
+        env_file=(_SERVICE_ROOT / ".env", ".env"),
+        extra="ignore",
+        frozen=True,
     )
 
     environment: str = "development"
     log_level: str = "INFO"
 
     # --- model gateway ---------------------------------------------------------
-    groq_api_key: SecretStr = SecretStr("")
+    # Accepts the unprefixed GROQ_API_KEY as well as AGENT_GROQ_API_KEY. Third-party
+    # credentials conventionally use the provider's own variable name, so forcing the
+    # service prefix onto them is a needless source of "why is it not picking up my
+    # key" confusion.
+    groq_api_key: SecretStr = Field(
+        default=SecretStr(""),
+        validation_alias=AliasChoices("AGENT_GROQ_API_KEY", "GROQ_API_KEY"),
+    )
     groq_base_url: str = GROQ_BASE_URL
     model_chain: str = Field(
         default=DEFAULT_MODEL_CHAIN,

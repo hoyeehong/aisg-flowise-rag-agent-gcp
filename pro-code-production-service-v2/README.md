@@ -164,6 +164,35 @@ uv run ruff check . && uv run ruff format --check . \
 | Tests | None | 37 tests (18 unit, 19 integration), no network required |
 | Types | n/a | `mypy --strict` clean across 19 modules |
 
+### Verified end to end against a live model
+
+A full run through the real graph with a live Groq `openai/gpt-oss-20b`:
+create → revise-with-feedback → approve, across three separate HTTP requests.
+
+| Step | Result |
+| :--- | :--- |
+| `POST /v1/reports` | 202 in 3.0s, 2 LLM calls, 2,381-char draft with citation markers |
+| `POST .../review` (revise) | 200 in 1.7s, revision applied to the Executive Summary only, `revisions_used: 1/2` |
+| `POST .../review` (approve) | 200, `completed`, `final_report == draft` |
+| Repeat approve | 409 — the pause is genuinely consumed |
+| `/metrics` | 3 calls, 4,355 tokens, $0.0015355, no fallbacks |
+
+Two things this run showed that no scripted test could:
+
+**The grounding discipline holds.** Only one corpus chunk matched (177 chars), and the
+model said so rather than filling the gap — *"No country-specific or comparative
+information ... is available in the source"*, *"The source does not provide any GMV
+figures, inclusion indices, trust scores or sustainability KPIs."* This is the direct
+contrast with v1, where 451 chars of context produced 1,680 chars of confident prose
+making claims the context did not support.
+
+**Retrieval recall is the binding constraint, and now there is evidence for it.** The
+in-memory retriever matched 1 of 4 chunks for a well-formed query; pages 18, 23 and 31
+scored zero because token overlap cannot connect *"Tech for Good"* to *"digital trust"*
+or *"talent pipeline"*. That is not a tuning problem, it is the ceiling of lexical
+matching — and it is the concrete case for Phase 2's embeddings plus hybrid search,
+rather than an assertion that vector search would be nicer.
+
 ### Hardening applied to the image
 
 `python:3.11-slim` ships `pip`, `setuptools` and `wheel` in the global site-packages.
