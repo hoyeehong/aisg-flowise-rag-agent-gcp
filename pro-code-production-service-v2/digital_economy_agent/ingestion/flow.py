@@ -77,15 +77,21 @@ async def ingest_document_task(
     dsn: str,
     *,
     api_key: str | None = None,
+    admin_dsn: str | None = None,
     dimensions: int = 768,
     tenant_id: str = "default",
     chunk_size: int = 1000,
     overlap: int = 200,
     max_pages: int | None = None,
 ) -> dict[str, Any]:
-    """Ingest one document. Returns a JSON-serialisable summary for the flow run."""
+    """
+    Ingest one document. Returns a JSON-serialisable summary for the flow run.
+
+    ``admin_dsn`` is used for DDL, which needs ownership the query role does not have.
+    It defaults to ``dsn``, keeping a single-DSN setup working.
+    """
     store = PgVectorStore(dsn, dimensions=dimensions)
-    await store.ensure_schema()
+    await PgVectorStore(admin_dsn or dsn, dimensions=dimensions).ensure_schema()
     result: IngestionResult = await ingest_pdf(
         Path(path),
         store=store,

@@ -45,8 +45,21 @@ async def _run(args: argparse.Namespace) -> int:
         )
         return 2
 
+    # DDL and role management need ownership, which the query role deliberately lacks.
+    # The admin DSN falls back to the app DSN when none is configured, so a single-DSN
+    # local setup keeps working -- at the cost of RLS being inert there.
+    admin = PgVectorStore(settings.admin_dsn, dimensions=settings.embedding_dimensions)
+    await admin.ensure_schema()
+    if settings.postgres_app_role:
+        await admin.ensure_app_role(
+            settings.postgres_app_role,
+            password=settings.postgres_app_password.get_secret_value() or None,
+        )
+
+    # Ingest through the app role, so this path is subject to the same policy the
+    # service is. Running ingestion as the owner would bypass RLS entirely and leave
+    # the write path untested against it.
     store = PgVectorStore(dsn, dimensions=settings.embedding_dimensions)
-    await store.ensure_schema()
 
     exit_code = 0
     for raw in args.paths:

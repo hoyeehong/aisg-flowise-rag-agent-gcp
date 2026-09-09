@@ -276,8 +276,24 @@ jobs:
           --health-retries 12
 
     env:
-      DSN: postgresql://postgres:devpass@localhost:5432/agent
-      AGENT_POSTGRES_DSN: postgresql://postgres:devpass@localhost:5432/agent
+      # Passed to the ingest CLI with --dsn, so ingestion writes as the app role and
+      # the *write* path is subject to the policy too. Bootstrap inside the CLI uses
+      # AGENT_POSTGRES_ADMIN_DSN below, which is what creates this role in the first
+      # place -- the store connects lazily, so the role exists by the time it is used.
+      DSN: postgresql://agent_app:apppass@localhost:5432/agent
+      # The service reads as the least-privilege role, so the row-level-security
+      # policy actually applies to it -- a superuser would bypass the policy and
+      # /readyz would report isolation unenforced, which now fails readiness.
+      # Bootstrap (DDL, role creation) needs ownership, hence the separate admin DSN.
+      AGENT_POSTGRES_DSN: postgresql://agent_app:apppass@localhost:5432/agent
+      AGENT_POSTGRES_ADMIN_DSN: postgresql://postgres:devpass@localhost:5432/agent
+      AGENT_POSTGRES_APP_ROLE: agent_app
+      AGENT_POSTGRES_APP_PASSWORD: apppass
+      # No identity provider here, so the eval harness sends no credential. Opting in
+      # explicitly, exactly as it opts in to the hashing embedder below: a missing
+      # credential must not quietly become an accepted configuration, and without this
+      # /readyz degrades and the harness cannot reach a tenant-scoped route at all.
+      AGENT_ALLOW_ANONYMOUS_TENANT: "true"
       AGENT_GROQ_API_KEY: not-needed-for-retrieval-only
       AGENT_USE_IN_MEMORY_RETRIEVER: "false"
       # Explicit opt-in to the deterministic embedder. This is what makes the eval a
