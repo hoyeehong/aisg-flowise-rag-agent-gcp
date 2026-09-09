@@ -351,22 +351,55 @@ jobs:
           DIGEST: ${{ steps.push.outputs.digest }}
 
       - name: Verify the signature and attestation
-        # Signing without verifying proves only that the command exited 0. This
-        # confirms the signature is discoverable and bound to this workflow identity,
-        # and it is deliberately storage-mode agnostic: an earlier version of this step
-        # probed for a `sha256-<digest>.sig` tag and broke when cosign 3.x moved to OCI
-        # 1.1 referrers. Asking a verifier is the question that actually matters.
+        # Bounded, and the payloads are captured rather than printed.
         #
-        # Consumers therefore need cosign >= 3.0 or other referrers-aware tooling; a
-        # cosign 2.x client reports "no signatures found" against a correctly signed
-        # image because it only looks at the legacy tag.
+        # `cosign verify-attestation` writes the whole DSSE envelope to stdout: for this
+        # SBOM that is a SINGLE line of ~4.4 MB. Both commands finish in about five
+        # seconds, but streaming one enormous line into the Actions log stalls the log
+        # uploader for many minutes -- the step printed its results and then sat there
+        # until the job timed out. stderr carries the human-readable banner and the list
+        # of checks performed, so redirecting stdout keeps all of the evidence and none
+        # of the flood.
+        #
+        # The timeouts bound a genuine hang (Rekor or Fulcio unreachable) rather than
+        # letting it consume the whole job budget.
+        timeout-minutes: 8
         run: |
-          cosign verify "${IMAGE}@${DIGEST}" \
+          set -euo pipefail
+
+          timeout 120 cosign verify "${IMAGE}@${DIGEST}" \
             --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com
-          cosign verify-attestation "${IMAGE}@${DIGEST}" --type spdxjson \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            > /tmp/signature.json
+
+          timeout 180 cosign verify-attestation "${IMAGE}@${DIGEST}" --type spdxjson \
             --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            > /tmp/attestation.json
+
+          # Redirected, not discarded: check the payloads actually say what they should.
+          # Without this, `> file` would only be hiding output rather than verifying it.
+          python3 - <<'CHECK'
+          import base64, json, sys
+
+          signature = json.load(open("/tmp/signature.json"))
+          kinds = {entry["critical"]["type"] for entry in signature}
+          print(f"signature payload types: {sorted(kinds)}")
+          if "https://sigstore.dev/cosign/sign/v1" not in kinds:
+              sys.exit("::error::no cosign signature entry in the verified payload")
+
+          envelope = json.load(open("/tmp/attestation.json"))
+          statement = json.loads(base64.b64decode(envelope["payload"]))
+          predicate = statement.get("predicateType", "")
+          packages = statement.get("predicate", {}).get("packages", [])
+          print(f"attestation predicateType: {predicate}")
+          print(f"attested SBOM packages: {len(packages)}")
+          if predicate != "https://spdx.dev/Document":
+              sys.exit(f"::error::unexpected predicateType {predicate!r}")
+          if len(packages) < 50:
+              sys.exit("::error::attested SBOM looks empty")
+          CHECK
+
           echo "signed and attested: ${IMAGE}@${DIGEST}"
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
