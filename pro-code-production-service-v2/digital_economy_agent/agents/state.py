@@ -54,6 +54,11 @@ class AgentState(TypedDict, total=False):
 
     question: str
     top_k: int
+    # Recorded on the run so a later read can verify the caller owns it. The
+    # LangGraph checkpoint tables have no tenant column and are not covered by the
+    # RLS policy on `chunks`, so this is an application-level check, not a
+    # database-enforced one. Stated plainly because the difference matters.
+    tenant_id: str
     max_revisions: int
 
     context: str

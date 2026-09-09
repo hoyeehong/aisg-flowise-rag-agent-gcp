@@ -177,12 +177,13 @@ class HybridRetriever:
         variants = [line.strip(" -•\t") for line in completion.text.splitlines()]
         return [query, *[v for v in variants if v][:n]]
 
-    async def corpus_coverage(self) -> dict[str, list[int]]:
+    async def corpus_coverage(self, tenant_id: str = "") -> dict[str, list[int]]:
         """Indexed pages per source, for evaluation preconditions."""
-        return await self._store.coverage(tenant_id=self._tenant_id)
+        return await self._store.coverage(tenant_id=tenant_id or self._tenant_id)
 
     async def retrieve(self, request: RetrievalRequest) -> RetrievalResult:
         cfg = self._config
+        tenant = request.tenant_id or self._tenant_id
         depth = max(request.top_k * cfg.candidate_multiplier, cfg.min_candidates)
         queries = await self._rewrite(request.query)
 
@@ -191,15 +192,13 @@ class HybridRetriever:
             embedding = (await self._embedder.embed([query], task=EmbedTask.QUERY))[0]
             ranked_lists.append(
                 (
-                    await self._store.vector_search(
-                        embedding, top_k=depth, tenant_id=self._tenant_id
-                    ),
+                    await self._store.vector_search(embedding, top_k=depth, tenant_id=tenant),
                     cfg.vector_weight,
                 )
             )
             ranked_lists.append(
                 (
-                    await self._store.lexical_search(query, top_k=depth, tenant_id=self._tenant_id),
+                    await self._store.lexical_search(query, top_k=depth, tenant_id=tenant),
                     cfg.lexical_weight,
                 )
             )

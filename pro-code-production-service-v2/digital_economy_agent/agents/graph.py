@@ -76,7 +76,9 @@ def build_graph(
         question = state["question"]
         top_k = state.get("top_k", 5)
         with span("retrieval", top_k=top_k) as retrieval_span:
-            result = await retriever.retrieve(RetrievalRequest(query=question, top_k=top_k))
+            result = await retriever.retrieve(
+                RetrievalRequest(query=question, top_k=top_k, tenant_id=state.get("tenant_id", ""))
+            )
             retrieval_span.set_attribute("chunks", len(result.chunks))
             retrieval_span.set_attribute("chars", result.total_chars)
         obs_metrics.RETRIEVAL_CHUNKS.observe(len(result.chunks))

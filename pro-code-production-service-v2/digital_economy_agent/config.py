@@ -106,6 +106,24 @@ class Settings(BaseSettings):
     # the role and its password are managed by Terraform.
     postgres_app_role: str = ""
     postgres_app_password: SecretStr = SecretStr("")
+
+    # --- authentication --------------------------------------------------------
+    # The tenant a request may touch comes from a verified token claim, never from a
+    # header or body: RLS enforces faithfully against whatever identifier it is given,
+    # so an attacker-supplied one is enforced just as faithfully.
+    jwt_secret: SecretStr = Field(
+        default=SecretStr(""),
+        description="Shared secret for HS* bearer tokens. Empty disables enforcement.",
+    )
+    jwt_algorithm: str = "HS256"
+    jwt_audience: str = ""
+    jwt_issuer: str = ""
+    jwt_tenant_claim: str = "tenant_id"
+    # Opt in to serving the configured `tenant_id` with no credential at all. This is
+    # the local-development and CI shape. Default False for the same reason
+    # `allow_hashing_embedder` is: a missing credential must not quietly become an
+    # accepted configuration, and `/readyz` reports the difference.
+    allow_anonymous_tenant: bool = False
     # Opting in to the deterministic embedder is a configuration decision, not a
     # degradation: it is how retrieval is evaluated in CI without an API key. Left
     # false, a missing embedding credential correctly reports the service as degraded,

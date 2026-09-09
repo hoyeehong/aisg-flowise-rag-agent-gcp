@@ -426,6 +426,37 @@ async def test_hybrid_returns_empty_for_an_empty_tenant(store, tenant):
     assert result.total_chars == 0
 
 
+async def test_request_tenant_overrides_the_constructed_one(seeded, store):
+    """
+    The per-request tenant wins over the tenant the retriever was built with.
+
+    One retriever instance serves every request, so per-request tenancy has to travel
+    on the request. If it did not, a multi-tenant deployment would serve whichever
+    tenant happened to be in the process's configuration -- and the RLS policy would
+    enforce that wrong tenant perfectly.
+    """
+    _, emb, tenant = seeded
+    retriever = HybridRetriever(store, emb, config=HybridConfig(), tenant_id=tenant)
+
+    # The retriever's own tenant has the corpus; the requested one is empty.
+    empty = await retriever.retrieve(
+        RetrievalRequest(query="digital trust", top_k=4, tenant_id=f"{tenant}-empty")
+    )
+    assert empty.chunks == [], "the request tenant was ignored in favour of the constructed one"
+
+    # Absent a request tenant, the constructed one is still used.
+    populated = await retriever.retrieve(RetrievalRequest(query="digital trust", top_k=4))
+    assert populated.chunks, "omitting the request tenant must fall back, not return nothing"
+
+
+async def test_coverage_is_reported_per_request_tenant(seeded, store):
+    """Corpus coverage must follow the caller's tenant, not the process configuration."""
+    _, emb, tenant = seeded
+    retriever = HybridRetriever(store, emb, tenant_id=tenant)
+    assert await retriever.corpus_coverage(tenant) != {}
+    assert await retriever.corpus_coverage(f"{tenant}-empty") == {}
+
+
 async def test_hybrid_carries_citations(seeded):
     store, emb, tenant = seeded
     retriever = HybridRetriever(store, emb, tenant_id=tenant)

@@ -33,6 +33,11 @@ class RetrievalRequest(BaseModel):
 
     query: str = Field(min_length=1, max_length=2000)
     top_k: int = Field(default=5, ge=1, le=50)
+    # Empty means "whatever tenant this retriever was constructed for", which is the
+    # single-tenant path and what the in-memory retriever always does. A request that
+    # names a tenant has had it resolved from a verified credential, never from the
+    # request body -- see api/auth.py.
+    tenant_id: str = ""
 
 
 class RetrievalResult(BaseModel):
