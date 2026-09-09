@@ -63,7 +63,12 @@ jobs:
       - name: Install dependencies
         # --frozen fails if uv.lock is stale, so CI cannot pass against a lockfile
         # that does not match pyproject.toml.
-        run: uv sync --frozen --extra dev
+        #
+        # The ingestion extra is included because flow.py type checks against the real
+        # Prefect decorators under TYPE_CHECKING. Without it installed, mypy cannot see
+        # them and the type checking of that module would be vacuous. The
+        # optional-deps job below separately proves Prefect remains optional at runtime.
+        run: uv sync --frozen --extra dev --extra ingestion
 
       - name: Ruff (lint)
         run: uv run ruff check --output-format=github .
@@ -118,11 +123,48 @@ jobs:
           path: pro-code-production-service-v2/junit.xml
           if-no-files-found: warn
 
+  optional-deps:
+    name: prefect stays optional
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.5.11"
+          enable-cache: true
+          cache-dependency-glob: pro-code-production-service-v2/uv.lock
+
+      - name: Install WITHOUT the ingestion extra
+        run: uv sync --frozen --extra dev
+
+      - name: Assert the service works with no orchestrator installed
+        # The claim is that Prefect is optional and the API image need not carry it.
+        # A comment asserting that is worth nothing; this proves it.
+        run: |
+          uv run python -c "
+          import importlib.util, sys
+          if importlib.util.find_spec('prefect') is not None:
+              sys.exit('::error::prefect is installed; this job must run without it')
+
+          from digital_economy_agent.api.app import create_app
+          from digital_economy_agent.ingestion import ingest_pages, PatternRedactor
+          from digital_economy_agent.ingestion.flow import PREFECT_AVAILABLE, ingest_corpus_flow
+          assert PREFECT_AVAILABLE is False, 'flow.py should report prefect missing'
+          assert callable(ingest_corpus_flow), 'flow must stay callable via the shims'
+          print('service and ingestion pipeline import cleanly without prefect')
+          "
+
+      - name: Run the suite that does not need an orchestrator
+        run: uv run pytest tests/unit -q
+
   image:
     name: container build
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: quality
+    needs: [quality, optional-deps]
     steps:
       - uses: actions/checkout@v4
 

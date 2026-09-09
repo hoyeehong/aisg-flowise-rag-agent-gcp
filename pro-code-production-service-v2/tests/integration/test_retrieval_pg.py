@@ -100,6 +100,28 @@ async def test_ensure_schema_is_idempotent(store):
     await store.ensure_schema()  # must not raise on a second application
 
 
+async def test_bootstrap_works_before_the_extension_exists():
+    """
+    Schema creation must not require the pgvector type adapter.
+
+    Registering the adapter queries the database for the `vector` OID, which only
+    exists after CREATE EXTENSION -- so a store that registers on every connection
+    cannot bootstrap a fresh database at all. This test only proves the non-registering
+    connection path works; the genuine regression test is CI, whose Postgres service
+    container starts empty on every run. Do not "optimise" that by caching the
+    database volume, or this bug becomes invisible again.
+    """
+    fresh = PgVectorStore(DSN)
+    conn = await fresh._connect(register_vector=False)
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT 1 AS ok")
+            assert (await cur.fetchone())["ok"] == 1
+    finally:
+        await conn.close()
+    await fresh.ensure_schema()
+
+
 async def test_upsert_reports_inserts_then_updates(store, tenant):
     emb = HashingEmbedder()
     vectors = await emb.embed([c.text for c in CORPUS], task=EmbedTask.DOCUMENT)

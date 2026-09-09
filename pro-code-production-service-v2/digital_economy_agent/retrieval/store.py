@@ -58,9 +58,19 @@ class PgVectorStore:
         self._dsn = dsn
         self.dimensions = dimensions
 
-    async def _connect(self) -> psycopg.AsyncConnection[Any]:
+    async def _connect(self, *, register_vector: bool = True) -> psycopg.AsyncConnection[Any]:
+        """
+        Open a connection.
+
+        ``register_vector`` must be False before the schema exists: registering the
+        pgvector type adapter queries the database for the `vector` OID, which only
+        exists after ``CREATE EXTENSION``. Bootstrapping a fresh database therefore has
+        to connect without it -- otherwise ensure_schema() cannot create the very
+        extension it needs, which is exactly what a fresh CI service container hits.
+        """
         conn = await psycopg.AsyncConnection.connect(self._dsn, row_factory=dict_row)
-        await register_vector_async(conn)
+        if register_vector:
+            await register_vector_async(conn)
         return conn
 
     async def ensure_schema(self) -> None:
@@ -70,7 +80,7 @@ class PgVectorStore:
             # Keep the declared column width and the embedder in lockstep; a mismatch
             # would otherwise surface as an opaque insert error much later.
             ddl = ddl.replace("VECTOR(768)", f"VECTOR({self.dimensions})")
-        conn = await self._connect()
+        conn = await self._connect(register_vector=False)
         try:
             async with conn.cursor() as cur:
                 await cur.execute(sql.SQL(ddl))
