@@ -193,14 +193,50 @@ becomes measurable — which is what Phase 3's harness needs.
 ### Durability
 
 `AsyncPostgresSaver` replaces `InMemorySaver` when a DSN is configured, so a paused
-human-review run survives a restart. `/readyz` reports `durable_checkpointer`, and a
-service asked for durability that cannot provide it degrades rather than pretending:
-a restart would otherwise silently discard work awaiting a reviewer.
+human-review run survives a restart. Verified end to end against the built container: a
+report paused before `docker restart` came back byte-identical (3,172 chars) afterwards,
+and a reviewer could still approve it.
 
-### Tests: 98, up from 37
+### Probe semantics
 
-Unit tests are offline (deterministic hashing embedder). Retrieval integration tests run
-against **real Postgres** — the interesting behaviour is in SQL (generated `tsvector`,
+`/healthz` and `/readyz` are deliberately different, and the **status code** is what
+carries the difference — Kubernetes and Cloud Run route on the code and never parse the
+body:
+
+| Probe | Condition | Code | Effect |
+| :--- | :--- | :---: | :--- |
+| `/healthz` | process is up | 200 | always; a failing liveness probe *restarts*, and restarting cannot conjure a missing credential or database |
+| `/readyz` | all checks pass | 200 | traffic routed here |
+| `/readyz` | any check fails | **503** | traffic *drained*, no restart |
+
+Readiness drains; liveness restarts. Answering 200 while reporting
+`"status": "degraded"` would keep traffic arriving at an instance that had just said it
+could not do its job — with `durable_checkpointer: false`, for example, a restart would
+silently discard work awaiting a human reviewer.
+
+### The Postgres checkpointer shipped broken
+
+Worth recording, because the failure mode is more interesting than the fix.
+`ReportService` read state through the *synchronous* `graph.get_state()`.
+`InMemorySaver` tolerates that; `AsyncPostgresSaver` rejects it from the main thread
+with `InvalidStateError`. So every state read — `start`, `review`, `get` — returned a
+500 against a real database.
+
+The whole suite was green throughout, because every test used `InMemorySaver`: the
+integration tests inject a retriever, which disables the Postgres branch entirely. The
+bug only surfaced when the built container was driven end to end against Postgres.
+
+Fixed by making those reads `await ... aget_state(...)`, and covered by
+`tests/integration/test_durability_pg.py`, which runs against a genuine
+`AsyncPostgresSaver`. Reintroducing the sync call fails all four of those tests while
+the other 83 still pass — which is exactly the blind spot that let it reach a release.
+A checkpointer is not interchangeable with its in-memory stand-in, so the durable one
+needs its own coverage.
+
+### Tests: 104
+
+Unit tests are offline (deterministic hashing embedder). Retrieval and durability
+integration tests run against **real Postgres** — the interesting behaviour is in SQL (generated `tsvector`,
 HNSW ordering, `ON CONFLICT` idempotency), so a fake would test nothing. CI runs a
 `pgvector/pgvector:pg17` service and **asserts those tests were not skipped**, because a
 skip-if-unavailable marker is a local convenience that would otherwise hollow out CI
@@ -247,7 +283,7 @@ uv run ruff check . && uv run ruff format --check . \
 | `POST` | `/v1/reports/{id}/review` | Approve, or request a revision with feedback. |
 | `GET` | `/v1/reports/{id}` | Current state of a run. |
 | `GET` | `/healthz` | Liveness. Checks no dependency, deliberately. |
-| `GET` | `/readyz` | Readiness. Reports each check, so a missing credential drains traffic without a restart loop. |
+| `GET` | `/readyz` | Readiness. **200 ready / 503 degraded**, reporting each check by name. |
 | `GET` | `/metrics` | Gateway counters and a per-model cost meter. |
 
 ### What changed versus v1

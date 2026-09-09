@@ -62,9 +62,39 @@ async def test_healthz_is_dependency_free(client):
     assert r.json()["status"] == "ok"
 
 
+async def test_liveness_stays_ok_while_readiness_drains(retriever, no_sleep):
+    """
+    The two probes must disagree, and the status codes are what carry that.
+
+    A failing liveness probe triggers a *restart*, which cannot conjure a missing
+    credential or database. A failing readiness probe *drains* traffic, which is the
+    correct response. So /healthz stays 200 while /readyz answers 503.
+    """
+    cfg = Settings(
+        groq_api_key="",  # missing credential: unservable, but the process is fine
+        model_chain="primary",
+        use_in_memory_retriever=True,
+        use_postgres_checkpointer=False,
+    )
+    gateway = ModelGateway(
+        [ModelSpec(provider="groq", model="primary")],
+        {"groq": FakeProvider("groq")},
+        sleep=no_sleep,
+    )
+    app = create_app(cfg, gateway=gateway, retriever=retriever)
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            live = await c.get("/healthz")
+            ready = await c.get("/readyz")
+
+    assert live.status_code == 200, "liveness must not fail on a missing dependency"
+    assert ready.status_code == 503, "readiness must drain traffic"
+
+
 async def test_readyz_reports_each_check(client):
     r = await client.get("/readyz")
-    assert r.status_code == 200
+    assert r.status_code == 200, "a ready instance must answer 200 so probes route to it"
     body = r.json()
     assert body["status"] == "ready"
     assert body["checks"] == {
@@ -97,8 +127,10 @@ async def test_readyz_reports_durability_when_it_is_required(retriever, no_sleep
     async with LifespanManager(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
-            body = (await c.get("/readyz")).json()
+            response = await c.get("/readyz")
 
+    assert response.status_code == 503
+    body = response.json()
     assert body["status"] == "degraded"
     assert body["checks"]["durable_checkpointer"] is False
     assert "durable_checkpointer" in body["detail"]
@@ -121,8 +153,10 @@ async def test_readyz_asserts_retrieval_deps_only_when_pgvector_selected(retriev
     async with LifespanManager(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
-            checks = (await c.get("/readyz")).json()["checks"]
+            response = await c.get("/readyz")
 
+    assert response.status_code == 200, "irrelevant checks must not degrade readiness"
+    checks = response.json()["checks"]
     assert "embedding_credentials" not in checks
     assert "postgres_configured" not in checks
 
@@ -140,7 +174,10 @@ async def test_readyz_degrades_without_credentials(retriever, no_sleep):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
             assert (await c.get("/healthz")).status_code == 200
-            body = (await c.get("/readyz")).json()
+            response = await c.get("/readyz")
+
+    assert response.status_code == 503, "a probe reads the status code, not the body"
+    body = response.json()
     assert body["status"] == "degraded"
     assert body["checks"]["model_credentials"] is False
     assert "model_credentials" in body["detail"]

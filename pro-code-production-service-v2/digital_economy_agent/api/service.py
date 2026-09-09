@@ -75,8 +75,9 @@ class ReportService:
             cost=_cost_summary(values.get("llm_calls", [])),
         )
 
-    def _is_paused(self, thread_id: str) -> bool:
-        return bool(self._graph.get_state(self._config(thread_id)).next)
+    async def _is_paused(self, thread_id: str) -> bool:
+        snapshot = await self._graph.aget_state(self._config(thread_id))
+        return bool(snapshot.next)
 
     async def start(
         self,
@@ -95,11 +96,11 @@ class ReportService:
             },
             config=self._config(thread_id),
         )
-        return self.get(thread_id)
+        return await self.get(thread_id)
 
     async def review(self, thread_id: str, action: ReviewAction, feedback: str) -> ReportState:
         """Resume a paused run with a human verdict."""
-        snapshot = self._graph.get_state(self._config(thread_id))
+        snapshot = await self._graph.aget_state(self._config(thread_id))
         if not snapshot.created_at:
             raise RunNotFoundError(thread_id)
         if not snapshot.next:
@@ -113,11 +114,19 @@ class ReportService:
         await self._graph.ainvoke(
             Command(resume=decision.model_dump()), config=self._config(thread_id)
         )
-        return self.get(thread_id)
+        return await self.get(thread_id)
 
-    def get(self, thread_id: str) -> ReportState:
-        """Current state of a run."""
-        snapshot = self._graph.get_state(self._config(thread_id))
+    async def get(self, thread_id: str) -> ReportState:
+        """
+        Current state of a run.
+
+        Async, and using ``aget_state`` rather than ``get_state``, because
+        AsyncPostgresSaver rejects synchronous calls from the main thread with
+        InvalidStateError. The in-memory saver tolerates the sync call, so a suite that
+        only ever exercises InMemorySaver cannot catch this -- which is exactly how it
+        reached a release.
+        """
+        snapshot = await self._graph.aget_state(self._config(thread_id))
         if not snapshot.created_at:
             raise RunNotFoundError(thread_id)
         return self._project(thread_id, snapshot.values, paused=bool(snapshot.next))
