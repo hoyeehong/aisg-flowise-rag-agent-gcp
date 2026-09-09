@@ -1,0 +1,126 @@
+name: v2 service CI
+
+# Scoped to the v2 service: the v1 prototype is frozen, so changes there should not
+# trigger (or be gated by) this pipeline.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "pro-code-production-service-v2/**"
+      - ".github/workflows/v2-service-ci.yml"
+  pull_request:
+    paths:
+      - "pro-code-production-service-v2/**"
+      - ".github/workflows/v2-service-ci.yml"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: pro-code-production-service-v2
+
+concurrency:
+  group: v2-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: lint, types, tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.5.11"
+          enable-cache: true
+          cache-dependency-glob: pro-code-production-service-v2/uv.lock
+
+      - name: Install dependencies
+        # --frozen fails if uv.lock is stale, so CI cannot pass against a lockfile
+        # that does not match pyproject.toml.
+        run: uv sync --frozen --extra dev
+
+      - name: Ruff (lint)
+        run: uv run ruff check --output-format=github .
+
+      - name: Ruff (format check)
+        run: uv run ruff format --check .
+
+      - name: mypy (strict)
+        run: uv run mypy digital_economy_agent/
+
+      - name: pytest
+        # No network: every test uses scripted providers and the in-memory retriever,
+        # so a green run never depends on a model provider being up or in quota.
+        run: uv run pytest -q --junitxml=junit.xml
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-results
+          path: pro-code-production-service-v2/junit.xml
+          if-no-files-found: warn
+
+  image:
+    name: container build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: quality
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: pro-code-production-service-v2
+          push: false
+          load: true
+          tags: digital-economy-agent:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test the image
+        # Proves the container actually serves traffic, not merely that it builds.
+        run: |
+          docker run -d --name agent -p 8080:8080 \
+            -e AGENT_GROQ_API_KEY=ci-dummy \
+            digital-economy-agent:${{ github.sha }}
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8080/healthz >/dev/null 2>&1; then
+              echo "healthz OK after ${i}s"; break
+            fi
+            if [ "$i" = "30" ]; then
+              echo "::error::service did not become healthy"; docker logs agent; exit 1
+            fi
+            sleep 1
+          done
+          curl -fsS http://localhost:8080/readyz
+          docker rm -f agent
+
+      - name: Scan image for vulnerabilities
+        # Uses the official Trivy image rather than the marketplace action, pinned to an
+        # exact version. Two reasons: this is byte-for-byte the command that can be run
+        # locally, so CI and a developer's laptop cannot disagree; and it removes a
+        # third-party action from the supply chain for this step.
+        #
+        # Blocking: the image was verified at zero fixable HIGH/CRITICAL findings, so the
+        # gate is actionable rather than noise. --ignore-unfixed keeps it that way — only
+        # vulnerabilities with an available fix can fail the build.
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "${HOME}/.cache/trivy:/root/.cache/trivy" \
+            aquasec/trivy:0.74.0 image \
+              --scanners vuln \
+              --severity HIGH,CRITICAL \
+              --ignore-unfixed \
+              --exit-code 1 \
+              --format table \
+              digital-economy-agent:${{ github.sha }}

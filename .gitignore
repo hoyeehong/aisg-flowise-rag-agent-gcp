@@ -9,6 +9,11 @@
 **/.env
 *.env.local
 
+# ...but templates carry no secrets and must stay tracked.
+!.env.example
+!**/.env.example
+!*env.example
+
 # External / nested repositories
 LADP-Essentials/
 
@@ -64,3 +69,9 @@ data/storage/
 .idea/
 *.sublime-project
 *.sublime-workspace
+
+# v2 service tooling caches
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+junit.xml

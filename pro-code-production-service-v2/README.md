@@ -1,7 +1,8 @@
 # v2 — Pro-Code Production Service
 
-**Status:** Design stage. No code yet — this document fixes the naming and structure so that
-Phase 1 lands in the right shape rather than being reorganised later.
+**Status:** Phase 1 delivered — the service runs, is typed, and is covered by 34 tests.
+Phases 2–5 are still design-stage; the naming conventions below were fixed first so
+Phase 1 landed in the right shape rather than being reorganised later.
 
 v2 re-platforms the [v1 Flowise prototype](../low-code-rapid-prototype-v1/README.md) as a
 code-owned service: a typed API over a LangGraph agent, a RAG pipeline declared in code rather
@@ -39,28 +40,29 @@ git mv pro-code-production-service-v2 <new-name>
 
 ## 2. Target layout and naming conventions
 
+`✓` exists as of Phase 1; the rest is the agreed shape for later phases.
+
 ```
 pro-code-production-service-v2/
-├── digital_economy_agent/          # import root — underscores, singular domain noun
-│   ├── api/                        # FastAPI routers, request/response schemas
-│   ├── agents/                     # LangGraph graphs, nodes, state definitions
-│   ├── tools/                      # typed tool adapters (one module per adapter)
-│   ├── gateway/                    # model routing, retries, fallback chain, cost meter
-│   ├── retrieval/                  # chunking, embeddings, hybrid search, re-ranking
-│   ├── ingestion/                  # Prefect flows, PII redaction, metadata governance
-│   └── observability/              # OTel tracing, Prometheus metrics
+├── digital_economy_agent/          ✓ import root — underscores, singular domain noun
+│   ├── api/                        ✓ FastAPI routes, schemas, service layer
+│   ├── agents/                     ✓ LangGraph graph, nodes, state
+│   ├── tools/                      ✓ typed tool adapters (Retriever protocol + in-memory impl)
+│   ├── gateway/                    ✓ model routing, retries, fallback chain, cost meter
+│   ├── prompts/                    ✓ versioned prompt files + pinned loader
+│   ├── config.py                   ✓ environment-driven settings
+│   ├── retrieval/                  — chunking, embeddings, hybrid search, re-ranking (P2)
+│   ├── ingestion/                  — Prefect flows, PII redaction, governance (P2)
+│   └── observability/              ✓ package placeholder; OTel + Prometheus land in P4
 ├── tests/
-│   ├── unit/                       # mirrors the package tree 1:1
-│   ├── integration/                # real Postgres + mocked LLM
-│   └── load/                       # k6 / Locust scenarios
-├── evals/
-│   ├── golden/                     # versioned golden sets (see §4)
-│   ├── harness/                    # runner that calls the live API
-│   └── reports/                    # generated, gitignored except the latest baseline
-├── infra/terraform/                # one module per resource group
-├── charts/digital-economy-agent/   # Helm chart — kebab-case, matches the K8s object name
-├── Dockerfile
-└── pyproject.toml
+│   ├── unit/                       ✓ graph transitions, gateway taxonomy
+│   ├── integration/                ✓ real routes + real graph, scripted providers
+│   └── load/                       — k6 / Locust scenarios (P4)
+├── evals/                          — golden sets + harness against the live API (P3)
+├── infra/terraform/                — one module per resource group (P4)
+├── charts/digital-economy-agent/   — Helm chart, matches the K8s object name (P4)
+├── Dockerfile                      ✓ multi-stage, non-root, healthcheck
+└── pyproject.toml                  ✓
 ```
 
 ### Rules worth stating once
@@ -121,14 +123,109 @@ so a score is always attributable to an exact dataset revision.
 
 ---
 
+## 5. What Phase 1 delivered
+
+### Running it
+
+```bash
+cd pro-code-production-service-v2
+uv sync --extra dev
+
+# Serve (works without credentials; /readyz reports degraded until a key is set)
+AGENT_GROQ_API_KEY=... uv run uvicorn --factory \
+    digital_economy_agent.api.app:create_app --port 8080
+
+# The full CI gate, locally
+uv run ruff check . && uv run ruff format --check . \
+    && uv run mypy digital_economy_agent/ && uv run pytest -q
+```
+
+### HTTP surface
+
+| Method | Path | Purpose |
+| :--- | :--- | :--- |
+| `POST` | `/v1/reports` | Start a run. Returns **202** with a draft awaiting review — the run pauses for a human rather than completing. |
+| `POST` | `/v1/reports/stream` | Same, streaming node progress as SSE. Research and drafting take tens of seconds; the client sees progress instead of silence. |
+| `POST` | `/v1/reports/{id}/review` | Approve, or request a revision with feedback. |
+| `GET` | `/v1/reports/{id}` | Current state of a run. |
+| `GET` | `/healthz` | Liveness. Checks no dependency, deliberately. |
+| `GET` | `/readyz` | Readiness. Reports each check, so a missing credential drains traffic without a restart loop. |
+| `GET` | `/metrics` | Gateway counters and a per-model cost meter. |
+
+### What changed versus v1
+
+| Concern | v1 (Flowise) | v2 Phase 1 |
+| :--- | :--- | :--- |
+| HITL gate | UI session state | `interrupt()` against a checkpointer — a paused run is durable state keyed by `thread_id`, resumable across separate HTTP requests |
+| Revision loop | Unbounded loop node | `max_revisions` ceiling; exhausting it halts with `halted_reason` set and still returns the latest draft |
+| Tools | `agentTools: []` — none | `Retriever` Protocol with Pydantic-validated request/response; empty retrieval is reported, not hidden |
+| Model config | Inline in graph JSON | Gateway with a fallback chain, the three-way retry taxonomy, sticky selection and per-request cost metering |
+| Prompts | Text in graph JSON | Versioned files (`write_draft.v1.md`) with a pinned loader; every report records the version that produced it |
+| Tests | None | 37 tests (18 unit, 19 integration), no network required |
+| Types | n/a | `mypy --strict` clean across 19 modules |
+
+### Verified end to end against a live model
+
+A full run through the real graph with a live Groq `openai/gpt-oss-20b`:
+create → revise-with-feedback → approve, across three separate HTTP requests.
+
+| Step | Result |
+| :--- | :--- |
+| `POST /v1/reports` | 202 in 3.0s, 2 LLM calls, 2,381-char draft with citation markers |
+| `POST .../review` (revise) | 200 in 1.7s, revision applied to the Executive Summary only, `revisions_used: 1/2` |
+| `POST .../review` (approve) | 200, `completed`, `final_report == draft` |
+| Repeat approve | 409 — the pause is genuinely consumed |
+| `/metrics` | 3 calls, 4,355 tokens, $0.0015355, no fallbacks |
+
+Two things this run showed that no scripted test could:
+
+**The grounding discipline holds.** Only one corpus chunk matched (177 chars), and the
+model said so rather than filling the gap — *"No country-specific or comparative
+information ... is available in the source"*, *"The source does not provide any GMV
+figures, inclusion indices, trust scores or sustainability KPIs."* This is the direct
+contrast with v1, where 451 chars of context produced 1,680 chars of confident prose
+making claims the context did not support.
+
+**Retrieval recall is the binding constraint, and now there is evidence for it.** The
+in-memory retriever matched 1 of 4 chunks for a well-formed query; pages 18, 23 and 31
+scored zero because token overlap cannot connect *"Tech for Good"* to *"digital trust"*
+or *"talent pipeline"*. That is not a tuning problem, it is the ceiling of lexical
+matching — and it is the concrete case for Phase 2's embeddings plus hybrid search,
+rather than an assertion that vector search would be nicer.
+
+### Hardening applied to the image
+
+`python:3.11-slim` ships `pip`, `setuptools` and `wheel` in the global site-packages.
+The application runs entirely from `/app/.venv` and needs none of them at runtime, while
+`setuptools`' vendored `jaraco.context` and `wheel` were contributing two HIGH CVEs
+(CVE-2026-23949, CVE-2026-24049). Removing them took fixable HIGH/CRITICAL findings from
+two to zero, which is both a smaller attack surface and one less thing to triage on every
+scan.
+
+### Deliberate limitations
+
+* **`InMemorySaver`, not Postgres.** Paused runs live in process memory, so a restart
+  loses them. Phase 2 swaps in the Postgres checkpointer once Cloud SQL exists — the
+  graph code does not change, only the `checkpointer` argument.
+* **In-memory retriever, not vector search.** `InMemoryRetriever` scores token overlap
+  over a small fixed corpus. It exists so the graph, the API and the tests run with no
+  infrastructure, and so Phase 2 has a behavioural baseline. `describe()` says so at
+  runtime.
+* ~~The container image is unverified.~~ **Verified.** Built and run locally: healthy in
+  2s, non-root (uid 10001), Docker `HEALTHCHECK` reporting `healthy`, `uv` and `pip`
+  absent from the runtime layer, and **zero fixable HIGH/CRITICAL Trivy findings** after
+  removing the base image's build tooling. The Trivy gate in CI is therefore blocking,
+  not advisory.
+* **`/metrics` returns JSON, not Prometheus exposition format.** Phase 4 replaces it.
+
 ## 5. Phase order
 
 Phases are unchanged from the review; the naming above is what each one lands into.
 
 | Phase | Deliverable | Lands in |
 | :---: | :--- | :--- |
-| 0 | Truth pass — remove score floors, fix the dead gate, reconcile Groq/Gemini, correct deploy IAM | `../low-code-rapid-prototype-v1/` |
-| 1 | FastAPI + LangGraph service, Dockerfile, pytest, CI | `api/`, `agents/`, `tests/` |
+| 0 ✓ | Truth pass — remove score floors, fix the dead gate, reconcile Groq/Gemini, correct deploy IAM | `../low-code-rapid-prototype-v1/` |
+| 1 ✓ | FastAPI + LangGraph service, Dockerfile, pytest, CI | `api/`, `agents/`, `gateway/`, `tools/`, `tests/` |
 | 2 | pgvector hybrid retrieval + Prefect ingestion with PII redaction | `retrieval/`, `ingestion/` |
 | 3 | Eval harness against the live API, wired as a required PR check | `evals/` |
 | 4 | Terraform, Helm, OTel + Prometheus, Trivy/SBOM/signing | `infra/`, `charts/`, `observability/` |
