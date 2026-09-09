@@ -105,13 +105,22 @@ jobs:
           docker rm -f agent
 
       - name: Scan image for vulnerabilities
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          image-ref: digital-economy-agent:${{ github.sha }}
-          format: table
-          # Blocking: the image was verified at zero fixable HIGH/CRITICAL findings, so
-          # this gate is actionable rather than noise. ignore-unfixed keeps it that way
-          # — only vulnerabilities with an available fix can fail the build.
-          exit-code: "1"
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
+        # Uses the official Trivy image rather than the marketplace action, pinned to an
+        # exact version. Two reasons: this is byte-for-byte the command that can be run
+        # locally, so CI and a developer's laptop cannot disagree; and it removes a
+        # third-party action from the supply chain for this step.
+        #
+        # Blocking: the image was verified at zero fixable HIGH/CRITICAL findings, so the
+        # gate is actionable rather than noise. --ignore-unfixed keeps it that way — only
+        # vulnerabilities with an available fix can fail the build.
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "${HOME}/.cache/trivy:/root/.cache/trivy" \
+            aquasec/trivy:0.74.0 image \
+              --scanners vuln \
+              --severity HIGH,CRITICAL \
+              --ignore-unfixed \
+              --exit-code 1 \
+              --format table \
+              digital-economy-agent:${{ github.sha }}
