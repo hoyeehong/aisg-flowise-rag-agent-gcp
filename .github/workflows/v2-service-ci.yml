@@ -320,6 +320,14 @@ jobs:
           cache-to: type=gha,mode=max
 
       - uses: sigstore/cosign-installer@v4.1.2
+        with:
+          # Pinned deliberately. cosign 3.x stores signatures as OCI 1.1 referrers,
+          # where 2.x used a legacy `sha256-<digest>.sig` tag. Bumping this action from
+          # v3 to v4 silently moved cosign 2.x -> 3.x and therefore changed the artifact
+          # layout, which broke a check that had hardcoded the old tag. The signing
+          # format is a compatibility decision for every downstream verifier, so it
+          # belongs in this file rather than in an action's floating default.
+          cosign-release: v3.0.2
 
       - name: Sign the image by digest
         # By digest, never by tag: a tag can be repointed after signing, which would
@@ -342,24 +350,16 @@ jobs:
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
 
-      - name: Confirm the signature is discoverable in the registry
-        # cosign sign exiting 0 means it uploaded; this confirms the .sig tag is
-        # actually readable, which is what a downstream verifier depends on.
-        run: |
-          sig_tag="$(echo "${DIGEST}" | tr ':' '-').sig"
-          for i in $(seq 1 12); do
-            docker manifest inspect "${IMAGE}:${sig_tag}" >/dev/null 2>&1 && {
-              echo "signature tag present: ${IMAGE}:${sig_tag}"; exit 0; }
-            sleep 5
-          done
-          echo "::error::signature tag ${sig_tag} not readable after signing"
-          exit 1
-        env:
-          DIGEST: ${{ steps.push.outputs.digest }}
-
       - name: Verify the signature and attestation
         # Signing without verifying proves only that the command exited 0. This
-        # confirms the signature is discoverable and bound to this workflow identity.
+        # confirms the signature is discoverable and bound to this workflow identity,
+        # and it is deliberately storage-mode agnostic: an earlier version of this step
+        # probed for a `sha256-<digest>.sig` tag and broke when cosign 3.x moved to OCI
+        # 1.1 referrers. Asking a verifier is the question that actually matters.
+        #
+        # Consumers therefore need cosign >= 3.0 or other referrers-aware tooling; a
+        # cosign 2.x client reports "no signatures found" against a correctly signed
+        # image because it only looks at the legacy tag.
         run: |
           cosign verify "${IMAGE}@${DIGEST}" \
             --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \

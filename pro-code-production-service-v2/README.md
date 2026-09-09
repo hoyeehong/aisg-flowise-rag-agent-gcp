@@ -207,6 +207,20 @@ a tag.
   can be repointed after signing, which would make the signature attest to something
   other than what is deployed. The job then *verifies* its own signature and
   attestation — signing without verifying proves only that the command exited 0.
+
+  **Verifying a published image** needs cosign **3.0 or later**:
+
+  ```bash
+  cosign verify ghcr.io/<owner>/<repo>/digital-economy-agent@sha256:<digest> \
+      --certificate-identity-regexp "^https://github.com/<owner>/<repo>/" \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com
+  ```
+
+  cosign 3.x stores signatures as **OCI 1.1 referrers**, where 2.x used a legacy
+  `sha256-<digest>.sig` tag. A cosign 2.x client reports `no signatures found` against a
+  correctly signed image, because it only looks at the legacy tag. The cosign version is
+  pinned in the workflow for that reason: the storage format is a compatibility decision
+  for every downstream verifier, so it does not belong in an action's floating default.
 * Trivy still gates at zero fixable HIGH/CRITICAL, re-confirmed after the new
   observability dependencies.
 
