@@ -1,8 +1,9 @@
 # v2 — Pro-Code Production Service
 
-**Status:** Phase 1 delivered — the service runs, is typed, and is covered by 34 tests.
-Phases 2–5 are still design-stage; the naming conventions below were fixed first so
-Phase 1 landed in the right shape rather than being reorganised later.
+**Status:** Phases 1 and 2 delivered — the service runs on pgvector hybrid retrieval
+with a durable review gate, is `mypy --strict` clean, and is covered by 98 tests.
+Phases 3–5 remain design-stage; the naming conventions below were fixed first so the
+code landed in the right shape rather than being reorganised later.
 
 v2 re-platforms the [v1 Flowise prototype](../low-code-rapid-prototype-v1/README.md) as a
 code-owned service: a typed API over a LangGraph agent, a RAG pipeline declared in code rather
@@ -51,13 +52,14 @@ pro-code-production-service-v2/
 │   ├── gateway/                    ✓ model routing, retries, fallback chain, cost meter
 │   ├── prompts/                    ✓ versioned prompt files + pinned loader
 │   ├── config.py                   ✓ environment-driven settings
-│   ├── retrieval/                  — chunking, embeddings, hybrid search, re-ranking (P2)
-│   ├── ingestion/                  — Prefect flows, PII redaction, governance (P2)
+│   ├── retrieval/                  ✓ chunking, embeddings, pgvector, hybrid search, MMR
+│   ├── ingestion/                  ✓ PII redaction, idempotent pipeline, Prefect flow, CLI
 │   └── observability/              ✓ package placeholder; OTel + Prometheus land in P4
 ├── tests/
 │   ├── unit/                       ✓ graph transitions, gateway taxonomy
 │   ├── integration/                ✓ real routes + real graph, scripted providers
 │   └── load/                       — k6 / Locust scenarios (P4)
+├── docker-compose.yml              ✓ local pgvector dependency
 ├── evals/                          — golden sets + harness against the live API (P3)
 ├── infra/terraform/                — one module per resource group (P4)
 ├── charts/digital-economy-agent/   — Helm chart, matches the K8s object name (P4)
@@ -122,6 +124,102 @@ One case per line, each carrying `case_id`, `query`, `expected_sources`, `refere
 so a score is always attributable to an exact dataset revision.
 
 ---
+
+## 5. What Phase 2 delivered
+
+Phase 2 replaced the placeholder retriever with real hybrid retrieval and built the
+ingestion pipeline that feeds it. Both slot in behind protocols declared in Phase 1, so
+nothing in `agents/` or `api/` changed.
+
+### The measured objective
+
+Phase 1 ended with a number, not an opinion: the token-overlap retriever matched
+**1 of 4 chunks** on a well-formed query and returned **177 characters** of context.
+
+| | chunks matched | context chars |
+| :--- | :---: | :---: |
+| v1 token overlap | 1 / 4 | 177 |
+| v2 hybrid (same corpus, *hashing* embedder) | **4 / 4** | **681** |
+| v2 hybrid on the real 27-chunk IMDA corpus, Google embeddings | 4 / 4 | **2,427–3,643** |
+
+The middle row is the interesting one: the improvement holds even with a *non-semantic*
+embedder, which shows it comes from hybrid fusion and deeper candidate pools rather than
+from better vectors alone.
+
+This also closes the Phase 0 finding directly. Groundedness was reported `INCONCLUSIVE`
+because the fixture's context was 18–27% the length of the answer it had to support. At
+2,400–3,600 characters per query, context finally exceeds the answer, so groundedness
+becomes measurable — which is what Phase 3's harness needs.
+
+### Retrieval
+
+* **Hybrid search.** Vector (pgvector HNSW, cosine) and lexical (`tsvector` + GIN)
+  fused by Reciprocal Rank Fusion. The two fail in opposite directions: embeddings
+  generalise but blur exact tokens, so `ASEAN DEFA` can rank generic
+  "regional cooperation" prose first; lexical search nails the identifier but cannot
+  connect "Tech for Good" to "digital trust" at all. RRF fuses **ranks, not scores**,
+  because cosine similarity and `ts_rank_cd` are not on comparable scales — normalising
+  and adding them would let whichever produces bigger numbers dominate.
+* **Embeddings.** `gemini-embedding-001` at 768 dimensions with asymmetric task types
+  (`RETRIEVAL_DOCUMENT` vs `RETRIEVAL_QUERY`). Truncated outputs are **re-normalised**:
+  Gemini vectors are unit-length at their native 3072 dims, and slicing to 768 does not
+  preserve that, so cosine distance would silently mis-rank without it.
+* **MMR diversification.** A 200-char chunk overlap means neighbours share text, so an
+  un-diversified top-5 can spend three slots on the same passage. This is a
+  diversification pass, *not* a cross-encoder re-ranker — that is a later upgrade, and
+  calling it one would be a claim the code does not support.
+* **Query rewriting** via the model gateway, off by default because it costs an extra
+  model call per retrieval. Failure degrades to the original query rather than failing
+  the search.
+
+### Ingestion
+
+* **Idempotent by design, not by discipline.** Every chunk is keyed by a content hash of
+  `(source, page, text)` and upserted via `ON CONFLICT ... RETURNING (xmax = 0)`. A
+  re-run reports `inserted=0`, which is the *signal* that the pipeline is repeatable; a
+  run that dies halfway can simply be repeated.
+* **PII redaction before embedding.** Redacting afterwards would have already sent the
+  data to a third party and would leave the original recoverable in the vector's
+  neighbourhood.
+* **Redaction errs toward over-redaction.** A false positive costs a redacted word; a
+  false negative is a data breach. Checksums (Luhn, Singapore NRIC/FIN) therefore only
+  *annotate confidence* — a failed checksum is reported but the value is still redacted,
+  so a bug in a checksum could never turn a detection into a leak.
+* **Prefect is optional.** All correctness lives in `pipeline.py` with no orchestrator
+  import; `flow.py` adds only scheduling, retries and observability. The API image
+  therefore does not carry an orchestrator it will never run. A CLI
+  (`python -m digital_economy_agent.ingestion`) covers one-off backfills.
+
+### Durability
+
+`AsyncPostgresSaver` replaces `InMemorySaver` when a DSN is configured, so a paused
+human-review run survives a restart. `/readyz` reports `durable_checkpointer`, and a
+service asked for durability that cannot provide it degrades rather than pretending:
+a restart would otherwise silently discard work awaiting a reviewer.
+
+### Tests: 98, up from 37
+
+Unit tests are offline (deterministic hashing embedder). Retrieval integration tests run
+against **real Postgres** — the interesting behaviour is in SQL (generated `tsvector`,
+HNSW ordering, `ON CONFLICT` idempotency), so a fake would test nothing. CI runs a
+`pgvector/pgvector:pg17` service and **asserts those tests were not skipped**, because a
+skip-if-unavailable marker is a local convenience that would otherwise hollow out CI
+silently.
+
+### Phase 2 limitations
+
+* **`gemini-embedding-001`, not `text-embedding-004`.** The model v1's docs claimed is
+  not available on this key; only `gemini-embedding-001` and `gemini-embedding-2` are.
+* **Ingestion was verified on 12 of 75 pages**, bounded to preserve free-tier embedding
+  quota. Retrieval quality on the full corpus is therefore untested, and the visible
+  artefact of that is table-of-contents chunks ranking for some queries.
+* **Lexical search is conjunctive.** `websearch_to_tsquery` ANDs its terms, so a
+  multi-term paraphrase can match nothing lexically. Fusion compensates; a test
+  documents the behaviour rather than leaving it as a surprise.
+* **RRF `k=60` and the fusion weights are untuned.** They are the values from the
+  original formulation. Fitting them needs the Phase 3 golden set; tuning against a
+  handful of ad-hoc queries would just be overfitting.
+* **No cross-encoder re-ranker.** MMR diversifies; it does not score query-passage pairs.
 
 ## 5. What Phase 1 delivered
 
@@ -226,7 +324,7 @@ Phases are unchanged from the review; the naming above is what each one lands in
 | :---: | :--- | :--- |
 | 0 ✓ | Truth pass — remove score floors, fix the dead gate, reconcile Groq/Gemini, correct deploy IAM | `../low-code-rapid-prototype-v1/` |
 | 1 ✓ | FastAPI + LangGraph service, Dockerfile, pytest, CI | `api/`, `agents/`, `gateway/`, `tools/`, `tests/` |
-| 2 | pgvector hybrid retrieval + Prefect ingestion with PII redaction | `retrieval/`, `ingestion/` |
+| 2 ✓ | pgvector hybrid retrieval + Prefect ingestion with PII redaction | `retrieval/`, `ingestion/` |
 | 3 | Eval harness against the live API, wired as a required PR check | `evals/` |
 | 4 | Terraform, Helm, OTel + Prometheus, Trivy/SBOM/signing | `infra/`, `charts/`, `observability/` |
 | 5 | *(optional)* Kafka/Pub-Sub consumer, tenant isolation via Postgres RLS | `ingestion/`, `api/` |

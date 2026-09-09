@@ -117,7 +117,7 @@ This repository is organised into two deliberately separate tiers:
 | Tier | Folder | Status | Purpose |
 | :--- | :--- | :--- | :--- |
 | **v1 — Low-code rapid prototype** | [`low-code-rapid-prototype-v1/`](low-code-rapid-prototype-v1/) | Shipped, live | Flowise Agentflow v2 graph that validated the multi-agent + HITL approach in days. Frozen for feature work; retained as the demo surface and behavioural baseline. |
-| **v2 — Pro-code production service** | [`pro-code-production-service-v2/`](pro-code-production-service-v2/) | Phase 1 shipped | FastAPI service over a LangGraph agent, with the HITL gate as a durable `interrupt()`, a model gateway (fallback chain + cost meter), versioned prompts, 34 tests and `mypy --strict`. Phases 2–5 in design. |
+| **v2 — Pro-code production service** | [`pro-code-production-service-v2/`](pro-code-production-service-v2/) | Phases 1–2 shipped | FastAPI service over a LangGraph agent: pgvector hybrid retrieval (vector + lexical, RRF-fused), idempotent ingestion with PII redaction, a durable Postgres-backed review gate, a model gateway with fallback and cost metering, versioned prompts, 98 tests and `mypy --strict`. Phases 3–5 in design. |
 
 The v1 folder documents its own [known limitations](low-code-rapid-prototype-v1/README.md#known-limitations-of-this-tier);
 each is carried forward as a v2 requirement rather than patched in place.
@@ -143,9 +143,10 @@ each is carried forward as a v2 requirement rather than patched in place.
 │       ├── env.example                 # Sanitized deployment configuration template
 │       ├── flowise.html                # Lightweight embeddable chat web interface
 │       └── README_DEPLOY_GCP.md        # GCP infrastructure deployment guide
-├── pro-code-production-service-v2/     # v2 — pro-code service (Phase 1 shipped)
-│   ├── digital_economy_agent/          # FastAPI + LangGraph service, gateway, tools, prompts
-│   ├── tests/                          # 34 unit + integration tests, no network required
+├── pro-code-production-service-v2/     # v2 — pro-code service (Phases 1–2 shipped)
+│   ├── digital_economy_agent/          # FastAPI + LangGraph, gateway, retrieval, ingestion
+│   ├── tests/                          # 98 tests: unit offline, retrieval against real Postgres
+│   ├── docker-compose.yml              # Local pgvector dependency
 │   ├── Dockerfile                      # Multi-stage, non-root, healthcheck
 │   ├── pyproject.toml                  # Service dependencies (separate from the v1 tooling)
 │   └── README.md                       # Architecture, naming conventions & phased roadmap

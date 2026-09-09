@@ -10,11 +10,15 @@ written to logs or the /metrics surface.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .gateway import ModelSpec
+
+if TYPE_CHECKING:
+    from .retrieval import HybridConfig
 
 # Groq's OpenAI-compatible endpoint. The v1 agents ran openai/gpt-oss-20b here, so the
 # default chain keeps behavioural continuity with the prototype being replaced.
@@ -64,9 +68,37 @@ class Settings(BaseSettings):
     max_revisions: int = Field(default=3, ge=0, le=20)
 
     # --- retrieval -------------------------------------------------------------
-    # Phase 1 ships the in-memory retriever. Phase 2 introduces pgvector behind the
-    # same Retriever protocol and this flag selects between them.
+    # Selects between the Phase 1 in-memory retriever and the Phase 2 pgvector hybrid
+    # retriever, both behind the same Retriever protocol. Defaults to in-memory so the
+    # service still starts with no database, which keeps the test suite and a plain
+    # `uvicorn` run free of infrastructure.
     use_in_memory_retriever: bool = True
+
+    # Postgres, shared by the vector store and the LangGraph checkpointer.
+    postgres_dsn: str = ""
+    embedding_dimensions: int = Field(default=768, ge=64, le=3072)
+    embedding_model: str = "gemini-embedding-001"
+    # Embeddings come from Google; the chat models come from Groq. Two providers, two
+    # keys -- both accepted unprefixed for the same reason as the Groq key.
+    gemini_api_key: SecretStr = Field(
+        default=SecretStr(""),
+        validation_alias=AliasChoices("AGENT_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    )
+    tenant_id: str = "default"
+
+    # --- hybrid search ---------------------------------------------------------
+    retrieval_candidate_multiplier: int = Field(default=4, ge=1, le=20)
+    retrieval_vector_weight: float = Field(default=1.0, ge=0.0)
+    retrieval_lexical_weight: float = Field(default=1.0, ge=0.0)
+    retrieval_mmr_lambda: float = Field(default=0.7, ge=0.0, le=1.0)
+    retrieval_enable_mmr: bool = True
+    # 0 disables LLM query rewriting, which costs an extra model call per retrieval.
+    retrieval_rewrite_variants: int = Field(default=0, ge=0, le=5)
+
+    # --- durability ------------------------------------------------------------
+    # With Postgres configured, paused human-review runs survive a restart. Without it
+    # the graph falls back to an in-process saver and a restart loses them.
+    use_postgres_checkpointer: bool = True
 
     @field_validator("model_chain")
     @classmethod
@@ -91,8 +123,30 @@ class Settings(BaseSettings):
 
     @property
     def has_model_credentials(self) -> bool:
-        """Whether a real provider call could succeed. Drives /readyz."""
+        """Whether a real chat completion could succeed. Drives /readyz."""
         return bool(self.groq_api_key.get_secret_value())
+
+    @property
+    def has_embedding_credentials(self) -> bool:
+        """Whether real embeddings are available. Required for pgvector retrieval."""
+        return bool(self.gemini_api_key.get_secret_value())
+
+    @property
+    def postgres_configured(self) -> bool:
+        return bool(self.postgres_dsn.strip())
+
+    @property
+    def hybrid_config(self) -> HybridConfig:
+        from .retrieval import HybridConfig
+
+        return HybridConfig(
+            candidate_multiplier=self.retrieval_candidate_multiplier,
+            vector_weight=self.retrieval_vector_weight,
+            lexical_weight=self.retrieval_lexical_weight,
+            mmr_lambda=self.retrieval_mmr_lambda,
+            enable_mmr=self.retrieval_enable_mmr,
+            rewrite_variants=self.retrieval_rewrite_variants,
+        )
 
 
 def get_settings() -> Settings:

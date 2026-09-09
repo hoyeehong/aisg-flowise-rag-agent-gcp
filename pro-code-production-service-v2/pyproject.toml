@@ -12,6 +12,10 @@ dependencies = [
     "pydantic-settings>=2.6",
     "langgraph>=1.0",
     "httpx>=0.28",
+    "psycopg[binary]>=3.2",
+    "pgvector>=0.3",
+    "pypdf>=5.0",
+    "langgraph-checkpoint-postgres>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -20,6 +24,9 @@ dev = [
     "pytest-asyncio>=0.24",
     "ruff>=0.7",
     "mypy>=1.13",
+]
+ingestion = [
+    "prefect>=3.0",
 ]
 
 [build-system]
@@ -51,4 +58,5 @@ filterwarnings = ["error::DeprecationWarning"]
 dev = [
     "asgi-lifespan>=2.1.0",
     "pytest-asyncio>=1.4.0",
+    "pytest-postgresql>=6.0",
 ]
