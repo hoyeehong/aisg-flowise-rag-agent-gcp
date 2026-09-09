@@ -6,18 +6,27 @@ import json
 import logging
 import uuid
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Annotated, Any, cast
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from .. import __version__
 from ..agents import build_graph
 from ..config import Settings, get_settings
 from ..gateway import AllModelsFailed, GatewayError, ModelGateway, OpenAICompatibleProvider
+from ..retrieval import (
+    Embedder,
+    GoogleEmbedder,
+    HashingEmbedder,
+    HybridRetriever,
+    PgVectorStore,
+)
 from ..tools import Chunk, InMemoryRetriever, Retriever
 from .schemas import (
     CreateReportRequest,
@@ -72,13 +81,44 @@ _DEV_CORPUS = [
 ]
 
 
-def build_retriever(settings: Settings) -> Retriever:
-    """Select a retrieval implementation. Phase 2 adds the pgvector branch here."""
-    if not settings.use_in_memory_retriever:
-        raise NotImplementedError(
-            "pgvector retrieval arrives in Phase 2; set AGENT_USE_IN_MEMORY_RETRIEVER=true"
+def build_retriever(settings: Settings, *, gateway: ModelGateway | None = None) -> Retriever:
+    """
+    Select a retrieval implementation.
+
+    Both satisfy the same Retriever protocol, so nothing in agents/ or api/ changes
+    between them -- which is what the protocol was declared for in Phase 1.
+    """
+    if settings.use_in_memory_retriever:
+        return InMemoryRetriever(_DEV_CORPUS)
+
+    if not settings.postgres_configured:
+        raise ValueError(
+            "pgvector retrieval requires AGENT_POSTGRES_DSN "
+            "(or set AGENT_USE_IN_MEMORY_RETRIEVER=true)"
         )
-    return InMemoryRetriever(_DEV_CORPUS)
+    embedder: Embedder
+    if settings.has_embedding_credentials:
+        embedder = GoogleEmbedder(
+            settings.gemini_api_key.get_secret_value(),
+            model=settings.embedding_model,
+            dimensions=settings.embedding_dimensions,
+        )
+    else:
+        # Explicit and loud: the stack works, but retrieval quality will be lexical.
+        logger.warning(
+            "no embedding credentials; falling back to the hashing embedder. Retrieval "
+            "will have no semantic recall. Set GEMINI_API_KEY for real embeddings."
+        )
+        embedder = HashingEmbedder(dimensions=settings.embedding_dimensions)
+
+    store = PgVectorStore(settings.postgres_dsn, dimensions=settings.embedding_dimensions)
+    return HybridRetriever(
+        store,
+        embedder,
+        config=settings.hybrid_config,
+        gateway=gateway,
+        tenant_id=settings.tenant_id,
+    )
 
 
 def build_gateway(settings: Settings, *, client: httpx.AsyncClient | None = None) -> ModelGateway:
@@ -124,23 +164,54 @@ def create_app(
         logging.basicConfig(level=resolved.log_level.upper())
         app.state.settings = resolved
         app.state.gateway = gateway or build_gateway(resolved)
-        app.state.retriever = retriever or build_retriever(resolved)
-        # InMemorySaver keeps paused runs in process memory: a restart loses them.
-        # Phase 2 swaps in the Postgres checkpointer once Cloud SQL exists.
+        app.state.retriever = retriever or build_retriever(resolved, gateway=app.state.gateway)
+
+        # Durable human-review pauses need a real checkpointer. An injected retriever
+        # means a test harness, so the in-process saver is correct there.
+        checkpointer: BaseCheckpointSaver[Any] = InMemorySaver()
+        app.state.checkpoint_backend = "memory"
+        app.state.exit_stack = AsyncExitStack()
+        if (
+            retriever is None
+            and resolved.use_postgres_checkpointer
+            and resolved.postgres_configured
+        ):
+            saver = await app.state.exit_stack.enter_async_context(
+                AsyncPostgresSaver.from_conn_string(resolved.postgres_dsn)
+            )
+            await saver.setup()
+            checkpointer = saver
+            app.state.checkpoint_backend = "postgres"
+        elif retriever is None and resolved.use_postgres_checkpointer:
+            logger.warning(
+                "AGENT_POSTGRES_DSN is unset; paused human-review runs will be lost on "
+                "restart. Set it to make the review gate durable."
+            )
+
+        if isinstance(app.state.retriever, HybridRetriever):
+            await PgVectorStore(
+                resolved.postgres_dsn, dimensions=resolved.embedding_dimensions
+            ).ensure_schema()
+
         app.state.graph = build_graph(
-            app.state.gateway, app.state.retriever, checkpointer=InMemorySaver()
+            app.state.gateway, app.state.retriever, checkpointer=checkpointer
         )
         app.state.service = ReportService(
             app.state.graph,
             default_top_k=resolved.default_top_k,
             max_revisions=resolved.max_revisions,
         )
+        describe = getattr(app.state.retriever, "describe", None)
         logger.info(
-            "service ready: models=%s retriever=%s",
+            "service ready: models=%s retriever=%s checkpointer=%s",
             [s.key for s in resolved.models],
-            type(app.state.retriever).__name__,
+            describe() if callable(describe) else type(app.state.retriever).__name__,
+            app.state.checkpoint_backend,
         )
-        yield
+        try:
+            yield
+        finally:
+            await app.state.exit_stack.aclose()
 
     app = FastAPI(
         title="Digital Economy Research & Report Agent",
@@ -168,6 +239,12 @@ def create_app(
             "retriever_ready": request.app.state.retriever is not None,
             "model_credentials": cfg.has_model_credentials,
         }
+        if not cfg.use_in_memory_retriever:
+            # Only assert these when the service is actually configured to need them.
+            checks["embedding_credentials"] = cfg.has_embedding_credentials
+            checks["postgres_configured"] = cfg.postgres_configured
+        if cfg.use_postgres_checkpointer:
+            checks["durable_checkpointer"] = request.app.state.checkpoint_backend == "postgres"
         ok = all(checks.values())
         return ReadyResponse(
             status="ready" if ok else "degraded",

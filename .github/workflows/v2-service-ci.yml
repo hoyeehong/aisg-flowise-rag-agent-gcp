@@ -29,6 +29,27 @@ jobs:
     name: lint, types, tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
+
+    services:
+      # Real Postgres with pgvector. The retrieval integration tests exercise the
+      # generated tsvector column, HNSW cosine ordering and ON CONFLICT idempotency --
+      # all of which live in SQL, so a fake would test nothing.
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: devpass
+          POSTGRES_DB: agent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d agent"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+
+    env:
+      TEST_POSTGRES_DSN: postgresql://postgres:devpass@localhost:5432/agent
+
     steps:
       - uses: actions/checkout@v4
 
@@ -53,10 +74,41 @@ jobs:
       - name: mypy (strict)
         run: uv run mypy digital_economy_agent/
 
+      - name: Verify Postgres is reachable
+        # The retrieval tests skip themselves when Postgres is absent, which is right
+        # locally but would silently hollow out CI. Failing here keeps the skip an
+        # explicit local convenience rather than an accidental coverage gap.
+        run: |
+          uv run python -c "
+          import os, sys, psycopg
+          dsn = os.environ['TEST_POSTGRES_DSN']
+          try:
+              with psycopg.connect(dsn, connect_timeout=10):
+                  print('postgres reachable:', dsn.rsplit('@', 1)[-1])
+          except Exception as exc:
+              print(f'::error::postgres unreachable, retrieval tests would skip: {exc}')
+              sys.exit(1)
+          "
+
       - name: pytest
-        # No network: every test uses scripted providers and the in-memory retriever,
-        # so a green run never depends on a model provider being up or in quota.
+        # No model provider is contacted: chat calls use scripted providers and
+        # embeddings use the deterministic hashing embedder, so a green run never
+        # depends on an API being up or in quota. Postgres is real, by design.
         run: uv run pytest -q --junitxml=junit.xml
+
+      - name: Assert retrieval tests actually ran
+        # Guards against the skip-if-unavailable marker quietly disabling this suite.
+        run: |
+          uv run python - <<'EOF'
+          import xml.etree.ElementTree as ET
+          root = ET.parse("junit.xml").getroot()
+          cases = [c for c in root.iter("testcase")
+                   if "test_retrieval_pg" in (c.get("classname") or "")]
+          skipped = [c for c in cases if c.find("skipped") is not None]
+          print(f"retrieval integration tests: {len(cases)} collected, {len(skipped)} skipped")
+          if not cases or skipped:
+              raise SystemExit("::error::retrieval integration tests did not run against Postgres")
+          EOF
 
       - name: Upload test results
         if: always()

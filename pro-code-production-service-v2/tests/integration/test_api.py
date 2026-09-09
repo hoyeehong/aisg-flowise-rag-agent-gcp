@@ -23,11 +23,15 @@ from ..conftest import FakeProvider
 
 @pytest.fixture
 def settings() -> Settings:
+    # An in-process harness: the in-memory retriever and saver are the intent here, so
+    # the durability check is switched off rather than left to fail.
     return Settings(
         groq_api_key="test-key",
         model_chain="primary,secondary",
         max_revisions=2,
         default_top_k=3,
+        use_in_memory_retriever=True,
+        use_postgres_checkpointer=False,
     )
 
 
@@ -68,6 +72,59 @@ async def test_readyz_reports_each_check(client):
         "retriever_ready": True,
         "model_credentials": True,
     }
+
+
+async def test_readyz_reports_durability_when_it_is_required(retriever, no_sleep):
+    """
+    With the Postgres checkpointer requested but no DSN, readiness must degrade.
+
+    A service that has been asked for durable human-review pauses and cannot provide
+    them is not ready: a restart would silently discard work awaiting a reviewer.
+    """
+    cfg = Settings(
+        groq_api_key="k",
+        model_chain="primary",
+        use_in_memory_retriever=True,
+        use_postgres_checkpointer=True,
+        postgres_dsn="",
+    )
+    gateway = ModelGateway(
+        [ModelSpec(provider="groq", model="primary")],
+        {"groq": FakeProvider("groq")},
+        sleep=no_sleep,
+    )
+    app = create_app(cfg, gateway=gateway, retriever=retriever)
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            body = (await c.get("/readyz")).json()
+
+    assert body["status"] == "degraded"
+    assert body["checks"]["durable_checkpointer"] is False
+    assert "durable_checkpointer" in body["detail"]
+
+
+async def test_readyz_asserts_retrieval_deps_only_when_pgvector_selected(retriever, no_sleep):
+    """The embedding/Postgres checks must not fire when in-memory retrieval is chosen."""
+    cfg = Settings(
+        groq_api_key="k",
+        model_chain="primary",
+        use_in_memory_retriever=True,
+        use_postgres_checkpointer=False,
+    )
+    gateway = ModelGateway(
+        [ModelSpec(provider="groq", model="primary")],
+        {"groq": FakeProvider("groq")},
+        sleep=no_sleep,
+    )
+    app = create_app(cfg, gateway=gateway, retriever=retriever)
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            checks = (await c.get("/readyz")).json()["checks"]
+
+    assert "embedding_credentials" not in checks
+    assert "postgres_configured" not in checks
 
 
 async def test_readyz_degrades_without_credentials(retriever, no_sleep):
