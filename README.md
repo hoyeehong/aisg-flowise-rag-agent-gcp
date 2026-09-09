@@ -238,12 +238,62 @@ retrieved chunk set requires calling the live system — Phase 3 of the
 > fixed; the scores are withdrawn rather than restated.
 
 > [!TIP]
-> **Judge variance is real, and the range above is the evidence.** Four consecutive runs
-> at `temperature 0.0` returned groundedness `0.500`, `0.480`, `0.460`, `0.440` — a spread
-> of 0.06 on the one metric that decides the verdict. Composite drifted `0.833` → `0.813`
-> purely as a result. A single judge run is a sample, not a constant, so quoting three
-> decimal places from one run overstates precision. A production harness should run *n*
-> trials and report a mean with spread; scoped into Phase 3.
+> **Judge variance is real, within *and* across models.** Four consecutive runs of
+> `gemini-3-flash-preview` at `temperature 0.0` returned groundedness `0.500`, `0.480`,
+> `0.460`, `0.440` — a 0.06 spread on the metric that decides the verdict. Switching model
+> widened it further: `gemini-3.6-flash` returned `0.380`–`0.460` on the same fixture.
+> Cross-model spread exceeds within-model spread, which is why a blended run is reported
+> `INCONCLUSIVE` and why a published baseline must pin one model. A single run is a sample,
+> not a constant; running *n* trials and reporting mean with spread is scoped into Phase 3.
+
+### Judge Model Gateway (Routing, Retries & Fallback)
+
+Free-tier Gemini enforces per-model quotas, so a single 429 used to abort an entire
+evaluation run. The judge now routes through a fallback chain with a retry policy, which
+is the same shape as the model gateway v2 needs for the system itself.
+
+**Default chain** (newest first; every name verified present via the ListModels API):
+
+```
+gemini-3.8-flash → gemini-3.7-flash → gemini-3.6-flash → gemini-3.5-flash → gemini-3-flash-preview
+```
+
+Discover what your own key can call, and see which entries are in the chain:
+
+```bash
+uv run python main.py eval --list-judge-models
+```
+
+Override the chain, or pin one model, with a comma-separated list (or `JUDGE_MODEL_CHAIN`):
+
+```bash
+uv run python main.py eval --judge gemini --judge-models "gemini-3.8-flash,gemini-3.5-flash"
+uv run python main.py eval --judge gemini --judge-models "gemini-3.6-flash"   # pinned
+```
+
+**Failure classification drives the response** — the three cases are not interchangeable:
+
+| Condition | Response | Why |
+| :--- | :--- | :--- |
+| `429` quota | Advance to the next model **immediately**, no sleep | Quota resets in minutes, not seconds. Sleeping stalls the run while a sibling model is very likely available. |
+| `5xx` / timeout | Backoff-retry the *same* model (3 attempts, exponential + jitter) | "High demand" genuinely clears in seconds; jitter avoids synchronised retries. |
+| `404` / `400` / `403` | **Retire** the model for the rest of the run | A wrong name or missing access will never succeed; retrying it per case wastes a call every time. |
+| Entire chain rate-limited | One bounded cooldown (≤ 90s), then retry the chain once | With nothing left to fall back to, waiting out a per-minute limit beats aborting. A longer reported reset implies a *daily* quota, so it fails fast instead. |
+
+Model selection is **sticky**: once a model answers, it serves every subsequent case.
+Re-probing from the top per case would be slower and would let judge identity oscillate
+mid-run.
+
+> [!IMPORTANT]
+> **A blended run is never `PASSED`.** If the chain advances mid-run, different cases were
+> graded by different models, so the aggregate is a mix of judges rather than one
+> measurement. The runner records the judge model per case, sets `judge_consistent: false`,
+> and downgrades the verdict to `INCONCLUSIVE`. For a publishable baseline, pin a single
+> model with `--judge-models`.
+>
+> Moving aliases such as `gemini-flash-latest` are deliberately **excluded** from the
+> default chain: an alias can silently change which model produced a score, which defeats
+> the purpose of recording judge identity in provenance at all.
 
 ### Running Evaluations
 

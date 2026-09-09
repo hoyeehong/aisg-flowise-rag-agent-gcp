@@ -35,8 +35,10 @@ import argparse
 import hashlib
 import json
 import os
+import random
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -46,8 +48,37 @@ SYSTEM_UNDER_TEST = "Groq openai/gpt-oss-20b (Flowise Agentflow v2, temperature 
 
 # Judges are deliberately kept on a different model family from the system under test:
 # a model grading its own output exhibits self-preference bias.
-GEMINI_JUDGE_MODEL = "gemini-3-flash-preview"
+#
+# JUDGE FALLBACK CHAIN
+# Free-tier Gemini enforces per-model quotas, so a 429 on one model does not imply a
+# 429 on the next -- falling back across model versions recovers a run that would
+# otherwise abort. Ordered newest-first; each entry was verified present via the
+# ListModels API (run with --list-judge-models to re-check against your own key).
+#
+# Deliberately EXCLUDED: `gemini-flash-latest` and other moving aliases. An alias can
+# silently change which model produced a score, which destroys attribution -- the whole
+# point of recording judge identity in provenance.
+DEFAULT_GEMINI_JUDGE_CHAIN = (
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3-flash-preview",
+)
 OPENAI_JUDGE_MODEL = "gpt-4o-mini"
+
+# Retry policy for transient judge failures (429 / 5xx / timeout).
+JUDGE_MAX_ATTEMPTS_PER_MODEL = 3
+JUDGE_BACKOFF_BASE_SECONDS = 2.0
+# If the API asks us to wait longer than this, stop waiting and try the next model
+# instead. A long retryDelay signals a daily quota rather than a burst rate limit.
+JUDGE_MAX_WAIT_SECONDS = 45.0
+
+# Last resort: when EVERY model in the chain is rate-limited, there is nothing left to
+# fall back to, and free-tier limits are often per-minute (the API reports a delay of
+# ~30-60s). Waiting once is then far better than aborting the run. Bounded so a genuine
+# daily-quota exhaustion still fails fast rather than hanging.
+JUDGE_COOLDOWN_BUDGET_SECONDS = 90.0
 
 # Evaluation rubric thresholds
 THRESHOLDS = {
@@ -161,38 +192,263 @@ def _parse_judge_payload(raw_text, source):
     return parsed["context_relevance"], parsed["groundedness"], parsed["answer_relevance"], reasoning
 
 
-def judge_gemini(query, context, response, api_key, timeout=60):
-    """LLM-as-a-Judge via the Google Gemini REST API (no extra pip dependencies)."""
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{GEMINI_JUDGE_MODEL}:generateContent?key={api_key}"
-    )
+class ModelUnavailable(JudgeError):
+    """This model will not work for the rest of the run (404 / 400 / 403)."""
+
+
+class ModelRateLimited(JudgeError):
+    """This model is out of quota (429).
+
+    Kept distinct from ModelTransient because the response differs: a quota reset is
+    minutes-to-hours away, so sleeping on it stalls the run. The right move is to
+    advance to the next model in the chain immediately.
+    """
+
+
+class ModelTransient(JudgeError):
+    """A transient server fault (5xx / timeout) that typically clears in seconds."""
+
+
+# Retained as the umbrella type for callers that do not care which kind it was.
+ModelExhausted = (ModelRateLimited, ModelTransient)
+
+
+def _error_message(body, limit=160):
+    """Pull the human-readable message out of a Google API error envelope."""
+    try:
+        msg = json.loads(body).get("error", {}).get("message", "")
+    except (json.JSONDecodeError, AttributeError):
+        msg = ""
+    msg = " ".join((msg or body).split())
+    return msg[:limit] + ("..." if len(msg) > limit else "")
+
+
+def _classify_http_error(exc, body):
+    """
+    Map an HTTP failure onto a retry decision.
+
+    ModelUnavailable -> wrong model or no access; retire it for the run.
+    ModelRateLimited -> out of quota; advance to the next model now, do not sleep.
+    ModelTransient   -> server fault; short backoff on the same model is worthwhile.
+    """
+    detail = f"HTTP {exc.code}: {_error_message(body)}"
+    if exc.code in (400, 401, 403, 404):
+        return ModelUnavailable(detail)
+    if exc.code == 429:
+        return ModelRateLimited(detail)
+    return ModelTransient(detail)
+
+
+def _retry_delay_from_body(body):
+    """
+    Extract Google's suggested retry delay, if present.
+
+    The API returns it as a google.rpc.RetryInfo detail, e.g. {"retryDelay": "36s"}.
+    """
+    try:
+        details = json.loads(body).get("error", {}).get("details", [])
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    for d in details:
+        if "RetryInfo" in str(d.get("@type", "")):
+            raw = str(d.get("retryDelay", "")).rstrip("s")
+            try:
+                return float(raw)
+            except ValueError:
+                return None
+    return None
+
+
+def _gemini_generate(model, prompt, api_key, timeout=60):
+    """One generateContent call. Raises ModelUnavailable / ModelExhausted."""
+    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+           f"{model}:generateContent?key={api_key}")
     payload = {
-        "contents": [{"parts": [{"text": JUDGE_PROMPT.format(
-            query=query, context=context, response=response)}]}],
+        "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.0, "responseMimeType": "application/json"},
     }
     req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+        url, data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"}, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as res:
             data = json.loads(res.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        # Surface the API's own message; never leak the key in the URL.
-        raise JudgeError(f"Gemini judge HTTP {exc.code}: {exc.read().decode('utf-8', 'replace')[:300]}") from exc
+        # Read the body once; it carries both the message and any RetryInfo.
+        body = exc.read().decode("utf-8", "replace")
+        err = _classify_http_error(exc, body)
+        err.retry_after = _retry_delay_from_body(body)
+        raise err from exc
     except (urllib.error.URLError, TimeoutError) as exc:
-        raise JudgeError(f"Gemini judge unreachable: {exc}") from exc
+        raise ModelTransient(f"unreachable: {exc}") from exc
 
     try:
-        text = data["candidates"][0]["content"]["parts"][0]["text"]
+        return data["candidates"][0]["content"]["parts"][0]["text"]
     except (KeyError, IndexError) as exc:
-        raise JudgeError(f"Gemini judge returned no candidate content: {json.dumps(data)[:300]}") from exc
+        # A blocked or empty candidate is a property of this request, not the model.
+        raise ModelTransient(
+            f"no candidate content: {json.dumps(data)[:200]}") from exc
 
-    return _parse_judge_payload(text, f"Gemini ({GEMINI_JUDGE_MODEL})")
+
+class GeminiJudgeGateway:
+    """
+    Routes judge calls across a chain of Gemini models with retries and fallback.
+
+    Selection is *sticky*: once a model answers, it keeps serving every subsequent
+    case. Re-probing the chain per case would be slower and, worse, would let the
+    judge identity oscillate mid-run -- which makes the aggregate score a blend of
+    different judges rather than a measurement.
+    """
+
+    def __init__(self, chain, api_key, verbose=True):
+        self.chain = list(chain)
+        self.api_key = api_key
+        self.verbose = verbose
+        self.dead = {}            # model -> reason it was retired (permanent)
+        self.rate_limited = {}    # model -> suggested retry delay, if any
+        self.calls_by_model = {}  # model -> successful call count
+        self.cooldowns_used = 0
+        self._active = None
+
+    @property
+    def models_used(self):
+        return [m for m, n in self.calls_by_model.items() if n > 0]
+
+    def _candidates(self):
+        """Active model first, then the rest of the chain, skipping retired ones."""
+        ordered = ([self._active] if self._active else []) + \
+                  [m for m in self.chain if m != self._active]
+        return [m for m in ordered if m not in self.dead]
+
+    def _try_model(self, model, prompt):
+        """
+        Attempt one model. Returns text, or raises the failure that ended the attempt.
+
+        A 429 returns immediately without sleeping: quota does not come back in
+        seconds, so the next model in the chain is a far better use of the time.
+        Only 5xx/timeout earns a backoff retry against the same model.
+        """
+        last = None
+        for attempt in range(1, JUDGE_MAX_ATTEMPTS_PER_MODEL + 1):
+            try:
+                return _gemini_generate(model, prompt, self.api_key)
+            except (ModelUnavailable, ModelRateLimited) as exc:
+                if isinstance(exc, ModelRateLimited):
+                    self.rate_limited[model] = getattr(exc, "retry_after", None)
+                raise
+            except ModelTransient as exc:
+                last = exc
+                if attempt == JUDGE_MAX_ATTEMPTS_PER_MODEL:
+                    break
+                suggested = getattr(exc, "retry_after", None)
+                if suggested and suggested > JUDGE_MAX_WAIT_SECONDS:
+                    break
+                wait = suggested or min(
+                    JUDGE_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)),
+                    JUDGE_MAX_WAIT_SECONDS)
+                wait += random.uniform(0, 0.5 * wait)  # jitter: avoid lockstep retries
+                if self.verbose:
+                    print(f"    {model}: {exc} -> retry {attempt}/"
+                          f"{JUDGE_MAX_ATTEMPTS_PER_MODEL} in {wait:.1f}s")
+                time.sleep(wait)
+        raise last
+
+    def score(self, query, context, response):
+        """Score one case, walking the chain until a model answers."""
+        prompt = JUDGE_PROMPT.format(query=query, context=context, response=response)
+        candidates = self._candidates()
+        if not candidates:
+            raise JudgeError(
+                "every model in the judge chain is retired: "
+                + "; ".join(f"{m} ({r})" for m, r in self.dead.items()))
+
+        try:
+            return self._attempt_chain(prompt, candidates)
+        except JudgeError as first_failure:
+            # Everything failed. If the blocker was rate limiting rather than outage,
+            # one bounded cooldown is worth trying before giving up on the run.
+            waits = [d for d in (self.rate_limited.get(m) for m in candidates) if d]
+            if not waits:
+                raise
+            wait = min(waits)
+            if wait > JUDGE_COOLDOWN_BUDGET_SECONDS:
+                raise JudgeError(
+                    f"{first_failure} -- soonest quota reset is ~{wait:.0f}s, beyond the "
+                    f"{JUDGE_COOLDOWN_BUDGET_SECONDS:.0f}s cooldown budget. This looks "
+                    f"like a daily quota; re-run later or use --judge-models to select a "
+                    f"model with remaining quota.") from first_failure
+            if self.cooldowns_used >= 1:
+                raise JudgeError(
+                    f"{first_failure} -- already spent a cooldown this run; not "
+                    f"waiting again.") from first_failure
+
+            self.cooldowns_used += 1
+            wait += 2.0  # small buffer past the reported reset
+            if self.verbose:
+                print(f"    entire chain rate-limited; cooling down {wait:.0f}s "
+                      f"(one-time) then retrying")
+            time.sleep(wait)
+            self.rate_limited.clear()
+            return self._attempt_chain(prompt, self._candidates())
+
+    def _attempt_chain(self, prompt, candidates):
+        """Walk the candidate list once, returning the first successful score."""
+        errors = []
+        for model in candidates:
+            try:
+                text = self._try_model(model, prompt)
+            except ModelUnavailable as exc:
+                self.dead[model] = str(exc)
+                errors.append(f"{model}: {exc}")
+                if self.verbose:
+                    print(f"    {model}: unavailable, retiring for this run -- {exc}")
+                continue
+            except ModelRateLimited as exc:
+                errors.append(f"{model}: {exc}")
+                if self.verbose:
+                    delay = self.rate_limited.get(model)
+                    hint = f" (resets in ~{delay:.0f}s)" if delay else ""
+                    print(f"    {model}: quota exhausted{hint}, advancing chain")
+                continue
+            except ModelTransient as exc:
+                errors.append(f"{model}: {exc}")
+                if self.verbose:
+                    print(f"    {model}: transient fault persisted, advancing chain")
+                continue
+
+            if model != self._active and self.verbose and self._active is not None:
+                print(f"    judge switched: {self._active} -> {model}")
+            self._active = model
+            self.calls_by_model[model] = self.calls_by_model.get(model, 0) + 1
+            c, g, a, reason = _parse_judge_payload(text, f"Gemini ({model})")
+            return c, g, a, reason, model
+
+        raise JudgeError("all judge models failed for this case -- " + " | ".join(errors))
+
+
+def list_gemini_models(api_key):
+    """Print the models this key can actually call, for configuring the chain."""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}&pageSize=200"
+    try:
+        with urllib.request.urlopen(url, timeout=30) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        print(f"[FATAL] ListModels HTTP {exc.code}: "
+              f"{exc.read().decode('utf-8', 'replace')[:300]}", file=sys.stderr)
+        return EXIT_UNVERIFIED
+
+    names = sorted(
+        m["name"].removeprefix("models/") for m in data.get("models", [])
+        if "generateContent" in m.get("supportedGenerationMethods", []))
+    print(f"{len(names)} models support generateContent with this key:\n")
+    for n in names:
+        marker = "  <- in default chain" if n in DEFAULT_GEMINI_JUDGE_CHAIN else ""
+        print(f"  {n}{marker}")
+    missing = [m for m in DEFAULT_GEMINI_JUDGE_CHAIN if m not in names]
+    if missing:
+        print(f"\n[WARN] Default chain references models this key cannot call: "
+              f"{', '.join(missing)}")
+    return EXIT_OK
 
 
 def judge_openai(query, context, response, api_key):
@@ -240,9 +496,17 @@ def judge_heuristic(query, context, response):
     )
 
 
-def _build_caveats(leakage_flagged, insufficient_context, results):
+def _build_caveats(leakage_flagged, insufficient_context, results, judges_used=()):
     """Assemble the caveats that qualify how these numbers may be read."""
     caveats = []
+    if len(judges_used) > 1:
+        caveats.append(
+            f"JUDGE CHANGED MID-RUN. Cases were graded by {len(judges_used)} different "
+            f"models ({', '.join(judges_used)}) because the fallback chain advanced on "
+            f"quota exhaustion. Different models score differently, so the aggregate is "
+            f"a blend of judges, not a single measurement. Re-run when quota allows, or "
+            f"pin one model with --judge-models <name>, before quoting these numbers."
+        )
     if leakage_flagged:
         caveats.append(
             f"Token F1 >= {FIXTURE_LEAKAGE_F1} on {', '.join(leakage_flagged)}: the fixture's "
@@ -265,17 +529,21 @@ def _build_caveats(leakage_flagged, insufficient_context, results):
     return caveats
 
 
-def score_case(case, judge_mode, gemini_key, openai_key):
-    """Dispatch a single test case to the configured judge."""
+def score_case(case, judge_mode, gateway, openai_key):
+    """
+    Dispatch a single test case to the configured judge.
+
+    Returns (context_relevance, groundedness, answer_relevance, reasoning, judge_model).
+    """
     query = case["query"]
     context = case.get("retrieved_context", "")
     response = case.get("generated_response", "")
 
     if judge_mode == "gemini":
-        return judge_gemini(query, context, response, gemini_key)
+        return gateway.score(query, context, response)
     if judge_mode == "openai":
-        return judge_openai(query, context, response, openai_key)
-    return judge_heuristic(query, context, response)
+        return judge_openai(query, context, response, openai_key) + (OPENAI_JUDGE_MODEL,)
+    return judge_heuristic(query, context, response) + ("lexical-proxy",)
 
 
 EXIT_OK, EXIT_GATE_FAILED, EXIT_UNVERIFIED = 0, 1, 2
@@ -321,15 +589,21 @@ def sha256_file(path):
 
 
 def run_evaluation_pipeline(dataset_path, output_json_path, output_md_path,
-                            judge_mode="auto", gemini_key=None, openai_key=None):
+                            judge_mode="auto", gemini_key=None, openai_key=None,
+                            judge_chain=None):
     """Executes the evaluation suite across the benchmark dataset."""
     judge_mode = resolve_judge_mode(judge_mode, gemini_key, openai_key)
     verified = judge_mode in ("gemini", "openai")
-    judge_label = {
-        "gemini": f"Google Gemini ({GEMINI_JUDGE_MODEL})",
-        "openai": f"OpenAI ({OPENAI_JUDGE_MODEL})",
-        "heuristic": "Lexical token-overlap proxy (UNVERIFIED)",
-    }[judge_mode]
+    chain = list(judge_chain or DEFAULT_GEMINI_JUDGE_CHAIN)
+
+    gateway = None
+    if judge_mode == "gemini":
+        gateway = GeminiJudgeGateway(chain, gemini_key)
+        judge_label = f"Google Gemini (chain: {' -> '.join(chain)})"
+    elif judge_mode == "openai":
+        judge_label = f"OpenAI ({OPENAI_JUDGE_MODEL})"
+    else:
+        judge_label = "Lexical token-overlap proxy (UNVERIFIED)"
 
     print("=" * 63)
     print("  Scenario 5 -- RAG Triad Evaluation (fixture-scored)")
@@ -353,7 +627,8 @@ def run_evaluation_pipeline(dataset_path, output_json_path, output_md_path,
     for tc in test_cases:
         qid = tc["query_id"]
         try:
-            c_rel, ground, a_rel, reason = score_case(tc, judge_mode, gemini_key, openai_key)
+            c_rel, ground, a_rel, reason, judge_model = score_case(
+                tc, judge_mode, gateway, openai_key)
         except JudgeError as exc:
             _die_unverified(f"[FATAL] Judge failed on {qid}: {exc}\n"
                             f"        Refusing to substitute a fallback score.")
@@ -382,6 +657,8 @@ def run_evaluation_pipeline(dataset_path, output_json_path, output_md_path,
         # cannot support the measurement.
         if not context_sufficient and "groundedness" in failed:
             insufficient_context.append(qid)
+            # Same inheritance at case level: drop the composite from the reasons.
+            failed = [k for k in failed if k != "rag_triad_composite"]
 
         status = "UNVERIFIED" if not verified else ("PASS" if not failed else "FAIL")
         if not context_sufficient:
@@ -403,13 +680,15 @@ def run_evaluation_pipeline(dataset_path, output_json_path, output_md_path,
             "response_chars": resp_chars,
             "context_coverage_ratio": round(coverage, 2),
             "context_sufficient_for_groundedness": context_sufficient,
+            "judge_model": judge_model,
             "status": status,
             "failed_gates": failed,
             "evaluation_reasoning": reason,
         })
         detail = f" | failed: {', '.join(failed)}" if failed else ""
-        print(f"[{qid}] {status:10s} Triad {triad_avg:.2f} "
-              f"(ctx {c_rel:.2f}, grnd {ground:.2f}, ans {a_rel:.2f}) F1 {f1:.2f}{detail}")
+        print(f"[{qid}] {status:12s} Triad {triad_avg:.2f} "
+              f"(ctx {c_rel:.2f}, grnd {ground:.2f}, ans {a_rel:.2f}) "
+              f"F1 {f1:.2f} | judge {judge_model}{detail}")
 
     n = len(results)
     mean = {
@@ -443,12 +722,27 @@ def run_evaluation_pipeline(dataset_path, output_json_path, output_md_path,
         and "groundedness" in failed_aggregate
     )
     if groundedness_inconclusive:
-        failed_aggregate = [k for k in failed_aggregate if k != "groundedness"]
+        # The composite is the arithmetic mean of the three triad dimensions, so it
+        # inherits groundedness's invalidity. Excluding groundedness from the verdict
+        # while letting the composite fail on it would be incoherent.
+        failed_aggregate = [k for k in failed_aggregate
+                            if k not in ("groundedness", "rag_triad_composite")]
 
     token_f1_inconclusive = len(leakage_flagged) == len(results)
 
+    # If the chain fell back mid-run, different cases were graded by different models,
+    # so the aggregate is a blend of judges rather than one measurement. Record it and
+    # refuse to call the run PASSED on that basis.
+    judges_used = sorted({r["judge_model"] for r in results})
+    judge_consistent = len(judges_used) == 1
+    judge_fallback_occurred = verified and not judge_consistent
+
     if not verified:
         overall_status = "UNVERIFIED"
+        exit_code = EXIT_UNVERIFIED
+    elif judge_fallback_occurred:
+        # Scores exist, but they are not attributable to a single judge.
+        overall_status = "INCONCLUSIVE"
         exit_code = EXIT_UNVERIFIED
     elif (groundedness_inconclusive or token_f1_inconclusive) and not failed_aggregate and not failed_cases:
         overall_status = "INCONCLUSIVE"
@@ -471,6 +765,11 @@ def run_evaluation_pipeline(dataset_path, output_json_path, output_md_path,
             "system_under_test": SYSTEM_UNDER_TEST,
             "judge_mode": judge_mode,
             "judge": judge_label,
+            "judge_chain": chain if judge_mode == "gemini" else None,
+            "judge_models_used": judges_used,
+            "judge_consistent": judge_consistent,
+            "judge_calls_by_model": (gateway.calls_by_model if gateway else None),
+            "judge_models_retired": (gateway.dead if gateway else None),
             "verified": verified,
             "dataset_path": os.path.basename(dataset_path),
             "dataset_sha256": sha256_file(dataset_path),
@@ -486,7 +785,7 @@ def run_evaluation_pipeline(dataset_path, output_json_path, output_md_path,
         "mean_scores": {k: round(v, 3) for k, v in mean.items()},
         "thresholds": THRESHOLDS,
         "token_f1_inconclusive": len(leakage_flagged) == len(results),
-        "caveats": _build_caveats(leakage_flagged, insufficient_context, results),
+        "caveats": _build_caveats(leakage_flagged, insufficient_context, results, judges_used),
         "results": results,
     }
 
@@ -514,6 +813,16 @@ def run_evaluation_pipeline(dataset_path, output_json_path, output_md_path,
         print(f" Inconclusive cases:      {', '.join(inconclusive_cases)}")
     if groundedness_inconclusive:
         print(" Groundedness:            EXCLUDED from verdict (fixture cannot support it)")
+        print(" RAG Triad Composite:     EXCLUDED (contains groundedness)")
+    if verified:
+        served = ", ".join(f"{m} x{n}" for m, n in (gateway.calls_by_model.items()
+                                                    if gateway else [(judges_used[0], n)]))
+        print(f" Judge models served:     {served}")
+        if gateway and gateway.dead:
+            print(f" Judge models retired:    "
+                  f"{', '.join(f'{m} ({r[:40]})' for m, r in gateway.dead.items())}")
+        if not judge_consistent:
+            print(" Judge consistency:       BLENDED -- chain advanced mid-run")
     for c in summary["caveats"]:
         print(f"\n [CAVEAT] {c}")
     print(f"\n Report: {output_md_path}")
@@ -534,6 +843,9 @@ def generate_markdown_report(summary, md_path):
         if key == "groundedness" and summary.get("groundedness_inconclusive"):
             return "`INCONCLUSIVE`"
         if key == "token_f1_vs_reference" and summary.get("token_f1_inconclusive"):
+            return "`INCONCLUSIVE`"
+        if key == "rag_triad_composite" and summary.get("groundedness_inconclusive"):
+            # Contains groundedness; inherits its invalidity.
             return "`INCONCLUSIVE`"
         return "`PASS`" if value >= th[key] else "`FAIL`"
 
@@ -558,6 +870,7 @@ def generate_markdown_report(summary, md_path):
 **Project:** Scenario 5 -- Digital Economy Research & Report Agent (Multi-Agent + HITL)
 **System under test:** `{prov['system_under_test']}`
 **Judge:** `{prov['judge']}` -- a different model family from the system under test, to avoid self-preference bias
+**Judge models served:** {', '.join(f"`{m}`" for m in prov['judge_models_used'])}{'' if prov['judge_consistent'] else ' — **BLENDED, chain advanced mid-run**'}
 **Evaluation framework:** RAG Triad (TruLens / RAGAS methodology) & reference comparison
 **Run (UTC):** `{prov['timestamp_utc']}`
 **Dataset SHA-256:** `{prov['dataset_sha256'][:16]}...`
@@ -585,13 +898,13 @@ def generate_markdown_report(summary, md_path):
 
 ## 2. Per-Query Breakdown
 
-| Test ID | Query | Ctx Rel. | Grnd. | Ans Rel. | Triad | F1 | Status |
-| :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| Test ID | Query | Ctx Rel. | Grnd. | Ans Rel. | Triad | F1 | Judge | Status |
+| :---: | :--- | :---: | :---: | :---: | :---: | :---: | :--- | :---: |
 """
     for r in summary["results"]:
-        md += (f"| {r['query_id']} | {r['query'][:45]}... | {r['context_relevance']} | "
+        md += (f"| {r['query_id']} | {r['query'][:40]}... | {r['context_relevance']} | "
                f"{r['groundedness']} | {r['answer_relevance']} | {r['rag_triad_average']} | "
-               f"{r['token_f1_vs_reference']} | `{r['status']}` |\n")
+               f"{r['token_f1_vs_reference']} | `{r['judge_model']}` | `{r['status']}` |\n")
 
     md += "\n---\n\n## 3. Per-Case Detail\n\n"
     for r in summary["results"]:
@@ -633,12 +946,33 @@ if __name__ == "__main__":
     parser.add_argument("--output-md", default=os.path.join(BASE_DIR, "evaluation_report.md"))
     parser.add_argument("--judge", choices=["auto", "gemini", "openai", "heuristic"], default="auto",
                         help="Judge to use. 'auto' prefers Gemini, then OpenAI, then fails.")
+    parser.add_argument("--judge-models", default=os.getenv("JUDGE_MODEL_CHAIN"),
+                        help="Comma-separated Gemini fallback chain, newest first. "
+                             "Pass a single name to pin one judge for reproducible scores. "
+                             f"Default: {','.join(DEFAULT_GEMINI_JUDGE_CHAIN)}")
+    parser.add_argument("--list-judge-models", action="store_true",
+                        help="List models this API key can call, then exit.")
     parser.add_argument("--gemini-key", default=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
     parser.add_argument("--openai-key", default=os.getenv("OPENAI_API_KEY"))
     args = parser.parse_args()
 
+    if args.list_judge_models:
+        if not args.gemini_key:
+            print("[FATAL] --list-judge-models requires GEMINI_API_KEY (or --gemini-key).",
+                  file=sys.stderr)
+            sys.exit(EXIT_UNVERIFIED)
+        sys.exit(list_gemini_models(args.gemini_key))
+
+    chain = None
+    if args.judge_models:
+        chain = [m.strip() for m in args.judge_models.split(",") if m.strip()]
+        if not chain:
+            print("[FATAL] --judge-models was empty after parsing.", file=sys.stderr)
+            sys.exit(EXIT_UNVERIFIED)
+
     _, code = run_evaluation_pipeline(
         args.dataset, args.output_json, args.output_md,
         judge_mode=args.judge, gemini_key=args.gemini_key, openai_key=args.openai_key,
+        judge_chain=chain,
     )
     sys.exit(code)

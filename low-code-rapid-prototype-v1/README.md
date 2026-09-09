@@ -91,8 +91,15 @@ Token F1 `INCONCLUSIVE` for the reasons above; overall `INCONCLUSIVE`. See
 [root README](../README.md) for the full scorecard and provenance.
 
 ```bash
-# Publishable scores (requires a judge key)
+# Discover which judge models your key can call
+uv run python main.py eval --list-judge-models
+
+# Publishable scores (requires a judge key). Pin one model: a run whose judge
+# changed mid-chain is reported INCONCLUSIVE, since the aggregate blends judges.
 export GEMINI_API_KEY="..."
+uv run python main.py eval --judge gemini --judge-models "gemini-3.6-flash"
+
+# Default 5-model fallback chain (survives per-model quota exhaustion)
 uv run python main.py eval --judge gemini
 
 # Lexical proxies only -- always UNVERIFIED, exit 2

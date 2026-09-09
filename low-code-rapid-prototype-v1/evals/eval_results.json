@@ -1,15 +1,32 @@
 {
   "provenance": {
-    "timestamp_utc": "2026-09-09T03:26:39.059763+00:00",
+    "timestamp_utc": "2026-09-09T03:58:14.317721+00:00",
     "evaluation_mode": "fixture",
     "evaluation_mode_note": "Scores a pre-recorded dataset, not a live system. retrieved_context and generated_response come from the dataset; the Flowise prediction API is not called.",
     "system_under_test": "Groq openai/gpt-oss-20b (Flowise Agentflow v2, temperature 0.3)",
     "judge_mode": "gemini",
-    "judge": "Google Gemini (gemini-3-flash-preview)",
+    "judge": "Google Gemini (chain: gemini-3.8-flash -> gemini-3.7-flash -> gemini-3.6-flash -> gemini-3.5-flash -> gemini-3-flash-preview)",
+    "judge_chain": [
+      "gemini-3.8-flash",
+      "gemini-3.7-flash",
+      "gemini-3.6-flash",
+      "gemini-3.5-flash",
+      "gemini-3-flash-preview"
+    ],
+    "judge_models_used": [
+      "gemini-3.7-flash",
+      "gemini-3.8-flash"
+    ],
+    "judge_consistent": false,
+    "judge_calls_by_model": {
+      "gemini-3.7-flash": 2,
+      "gemini-3.8-flash": 3
+    },
+    "judge_models_retired": {},
     "verified": true,
     "dataset_path": "evaluation_dataset.json",
     "dataset_sha256": "50690196a05ac3c3f97edffd0558556d905eda8a049d126bf7ecd0fc96d1a0f8",
-    "runner_sha256": "33099022908d6c8b24482d28bac318c0a138aaf81c6755988e340a51816296b3"
+    "runner_sha256": "a94923a3bbc1f66d7464b152eb92dda329e82de850b4d66892a8f9fb1db8cf04"
   },
   "scenario": "Scenario 5: IMDA SEA Digital Economy Report",
   "total_test_cases": 5,
@@ -25,12 +42,12 @@
   ],
   "groundedness_inconclusive": true,
   "mean_scores": {
-    "context_relevance": 1.0,
-    "groundedness_faithfulness": 0.44,
-    "answer_relevance": 1.0,
+    "context_relevance": 0.98,
+    "groundedness_faithfulness": 0.39,
+    "answer_relevance": 0.96,
     "mean_token_f1_vs_reference": 0.99,
     "mean_structure_completeness": 1.0,
-    "rag_triad_composite": 0.813
+    "rag_triad_composite": 0.777
   },
   "thresholds": {
     "context_relevance": 0.8,
@@ -42,6 +59,7 @@
   },
   "token_f1_inconclusive": true,
   "caveats": [
+    "JUDGE CHANGED MID-RUN. Cases were graded by 2 different models (gemini-3.7-flash, gemini-3.8-flash) because the fallback chain advanced on quota exhaustion. Different models score differently, so the aggregate is a blend of judges, not a single measurement. Re-run when quota allows, or pin one model with --judge-models <name>, before quoting these numbers.",
     "Token F1 >= 0.95 on TC-01, TC-02, TC-03, TC-04, TC-05: the fixture's generated_response is a near-copy of its reference_answer, so this metric measures the dataset, not the system.",
     "GROUNDEDNESS IS INCONCLUSIVE for TC-01, TC-02, TC-03, TC-04, TC-05. The recorded retrieved_context is shorter than 50% of the recorded generated_response (context/response char ratio: TC-01 0.27, TC-02 0.27, TC-03 0.20, TC-04 0.18, TC-05 0.20), so it cannot support the answer regardless of how the live system behaved. These scores measure the fixture's truncated context, NOT hallucination by the agent. Capturing the full retrieved chunk set requires a harness that calls the live system (Phase 3)."
   ],
@@ -50,98 +68,101 @@
       "query_id": "TC-01",
       "query": "Write a brief report on the shift from \"Tech for Growth\" to \"Tech for Good\" in Southeast Asia.",
       "context_relevance": 1.0,
-      "groundedness": 0.6,
+      "groundedness": 0.55,
       "answer_relevance": 1.0,
-      "rag_triad_average": 0.867,
+      "rag_triad_average": 0.85,
       "token_f1_vs_reference": 0.952,
       "structure_completeness": 1.0,
       "context_chars": 451,
       "response_chars": 1680,
       "context_coverage_ratio": 0.27,
       "context_sufficient_for_groundedness": false,
+      "judge_model": "gemini-3.7-flash",
       "status": "INCONCLUSIVE",
       "failed_gates": [
         "groundedness"
       ],
-      "evaluation_reasoning": "The context is highly relevant as it provides the core themes for the report. The response is perfectly structured and answers the query directly. However, the groundedness score is lower because the response introduces significant external information not found in the retrieved context, such as specific policy recommendations (vouchers, AI literacy), mentions of 'ASEAN DEFA', and the 'urban vs rural' paradox."
+      "evaluation_reasoning": "The retrieved context is directly relevant to the query. The generated response follows the user prompt exceptionally well with a structured mini-report; however, it extrapolates significantly beyond the brief context snippet, introducing ungrounded specifics such as ASEAN DEFA, data center energy certifications, digital capability vouchers, and urban-rural divides."
     },
     {
       "query_id": "TC-02",
       "query": "Summarise the SEA-6 economies' ambitions and objectives for the digital economy.",
       "context_relevance": 1.0,
       "groundedness": 0.5,
-      "answer_relevance": 1.0,
-      "rag_triad_average": 0.833,
+      "answer_relevance": 0.95,
+      "rag_triad_average": 0.817,
       "token_f1_vs_reference": 1.0,
       "structure_completeness": 1.0,
       "context_chars": 449,
       "response_chars": 1647,
       "context_coverage_ratio": 0.27,
       "context_sufficient_for_groundedness": false,
+      "judge_model": "gemini-3.8-flash",
       "status": "INCONCLUSIVE",
       "failed_gates": [
         "groundedness"
       ],
-      "evaluation_reasoning": "The context was highly relevant to the query. The response followed the requested 4-part report structure perfectly and answered the prompt comprehensively. However, the groundedness score is lower because the response included significant external information not found in the retrieved context, such as 'green compute', specific locations in Malaysia (Johor/Cyberjaya), specific industries in Thailand (automotive/electronics), and the ASEAN DEFA framework."
+      "evaluation_reasoning": "The retrieved context is perfectly relevant to the query. The generated response follows a clear 4-part report structure and thoroughly answers the query, but it introduces a significant amount of external knowledge and ungrounded specifics (e.g., green compute, corridors in Johor and Cyberjaya, ASEAN DEFA, specific industries for Thailand) not present in the retrieved context."
     },
     {
       "query_id": "TC-03",
       "query": "What are the key enablers for sustainable digital development identified in the report?",
       "context_relevance": 1.0,
-      "groundedness": 0.4,
-      "answer_relevance": 1.0,
-      "rag_triad_average": 0.8,
+      "groundedness": 0.35,
+      "answer_relevance": 0.95,
+      "rag_triad_average": 0.767,
       "token_f1_vs_reference": 1.0,
       "structure_completeness": 1.0,
       "context_chars": 297,
       "response_chars": 1476,
       "context_coverage_ratio": 0.2,
       "context_sufficient_for_groundedness": false,
+      "judge_model": "gemini-3.8-flash",
       "status": "INCONCLUSIVE",
       "failed_gates": [
-        "groundedness",
-        "rag_triad_composite"
+        "groundedness"
       ],
-      "evaluation_reasoning": "The context is highly relevant as it explicitly lists the four pillars requested. The response perfectly follows the requested 4-part report structure and answers the query. However, the groundedness score is low because the response includes many specific details (e.g., fiber, subsea cables, 5G, anti-scam measures, clean energy partnerships, and AI ethics sandboxes) that are not present in the provided context snippet, constituting hallucinations relative to the source text."
+      "evaluation_reasoning": "The retrieved context directly answers the query with the four core pillars. The generated response follows a comprehensive 4-part report format and addresses the query directly. However, groundedness is low because the response introduces extensive specific details, institutions (IMDA / Tech for Good Institute), regional scoping (SEA-6), and policy recommendations that are not present in the provided context."
     },
     {
       "query_id": "TC-04",
       "query": "What are the report's main recommendations for advancing the region's digital economy?",
       "context_relevance": 1.0,
-      "groundedness": 0.5,
-      "answer_relevance": 1.0,
-      "rag_triad_average": 0.833,
+      "groundedness": 0.35,
+      "answer_relevance": 0.95,
+      "rag_triad_average": 0.767,
       "token_f1_vs_reference": 1.0,
       "structure_completeness": 1.0,
       "context_chars": 261,
       "response_chars": 1446,
       "context_coverage_ratio": 0.18,
       "context_sufficient_for_groundedness": false,
+      "judge_model": "gemini-3.7-flash",
       "status": "INCONCLUSIVE",
       "failed_gates": [
         "groundedness"
       ],
-      "evaluation_reasoning": "The context is highly relevant as it provides the specific recommendations requested. The response follows the 4-part report structure perfectly and answers the query. However, the groundedness score is reduced because the response includes significant external information not found in the retrieved context, such as the specific report authors (IMDA/Tech for Good Institute), the $1 trillion valuation, specific MSME statistics, and references to Singapore's AI Verify."
+      "evaluation_reasoning": "The retrieved context is perfectly relevant to the query. However, the generated response hallucinates extensive background details, organizations (IMDA/Tech for Good Institute), statistics, and specific policy names not found in the retrieved context. The response thoroughly answers the user's question and is well-structured."
     },
     {
       "query_id": "TC-05",
       "query": "How does the report address digital trust, cybersecurity, and responsible AI governance?",
-      "context_relevance": 1.0,
+      "context_relevance": 0.9,
       "groundedness": 0.2,
-      "answer_relevance": 1.0,
-      "rag_triad_average": 0.733,
+      "answer_relevance": 0.95,
+      "rag_triad_average": 0.683,
       "token_f1_vs_reference": 1.0,
       "structure_completeness": 1.0,
       "context_chars": 315,
       "response_chars": 1587,
       "context_coverage_ratio": 0.2,
       "context_sufficient_for_groundedness": false,
+      "judge_model": "gemini-3.8-flash",
       "status": "INCONCLUSIVE",
       "failed_gates": [
-        "groundedness",
-        "rag_triad_composite"
+        "groundedness"
       ],
-      "evaluation_reasoning": "The retrieved context is highly relevant to the query as it directly mentions the three pillars requested. The generated response perfectly follows the requested 4-part report structure and answers the query comprehensively. However, the groundedness is very low because the response introduces a significant amount of external information not found in the retrieved context, such as specific details on phishing, 'AI Verify', 'Model AI Governance Framework', and 'ASEAN Cross-Border Data Flows Mechanism'."
+      "evaluation_reasoning": "The retrieved context is directly relevant to the query topic. However, the generated response is severely ungrounded, fabricating detailed external policies (Model AI Governance Framework, AI Verify, ASEAN data flow mechanisms, anti-scam hubs) that are not present in the provided snippet. The response nonetheless directly answers the query and effectively adopts the 4-part report format."
     }
   ]
 }
