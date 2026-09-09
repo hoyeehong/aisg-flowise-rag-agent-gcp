@@ -1,0 +1,4 @@
+# Generated eval reports. The committed baseline lives in ../baselines/ and is written
+# only by an explicit --write-baseline, so a routine run can never overwrite it.
+*
+!.gitignore

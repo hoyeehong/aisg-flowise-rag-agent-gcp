@@ -96,6 +96,17 @@ def maximal_marginal_relevance(
     """
     if not candidates:
         return []
+
+    # Normalise relevance to [0, 1] before trading it against redundancy. RRF produces
+    # scores around 1/(60+rank) ~ 0.016, while redundancy is a 0-1 Jaccard overlap, so
+    # on the raw scale `lambda * relevance` is swamped by `(1 - lambda) * redundancy`
+    # and lambda is inert: 0.7 behaved identically to 0.0. This is the same
+    # scale-mismatch RRF itself avoids by fusing ranks rather than scores -- it was
+    # reintroduced between the two stages. Found by the Phase 3 eval harness.
+    top = candidates[0][1]
+    scale = top if top > 0 else 1.0
+    candidates = [(chunk, score / scale) for chunk, score in candidates]
+
     selected: list[tuple[Chunk, float]] = [candidates[0]]
     remaining = list(candidates[1:])
 
@@ -165,6 +176,10 @@ class HybridRetriever:
 
         variants = [line.strip(" -•\t") for line in completion.text.splitlines()]
         return [query, *[v for v in variants if v][:n]]
+
+    async def corpus_coverage(self) -> dict[str, list[int]]:
+        """Indexed pages per source, for evaluation preconditions."""
+        return await self._store.coverage(tenant_id=self._tenant_id)
 
     async def retrieve(self, request: RetrievalRequest) -> RetrievalResult:
         cfg = self._config

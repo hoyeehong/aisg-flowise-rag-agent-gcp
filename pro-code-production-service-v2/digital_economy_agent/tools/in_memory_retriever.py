@@ -60,6 +60,14 @@ class InMemoryRetriever:
     def describe() -> str:
         return "in-memory token-overlap retriever (development only; not a vector search)"
 
+    async def corpus_coverage(self) -> dict[str, list[int]]:
+        """Indexed pages per source, for evaluation preconditions."""
+        pages: dict[str, set[int]] = {}
+        for chunk in self._chunks:
+            if chunk.page is not None:
+                pages.setdefault(chunk.source, set()).add(chunk.page)
+        return {source: sorted(p) for source, p in pages.items()}
+
     async def retrieve(self, request: RetrievalRequest) -> RetrievalResult:
         query_tokens = _tokens(request.query)
         if not query_tokens:

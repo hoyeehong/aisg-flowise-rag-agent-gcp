@@ -27,13 +27,16 @@ from ..retrieval import (
     HybridRetriever,
     PgVectorStore,
 )
-from ..tools import Chunk, InMemoryRetriever, Retriever
+from ..tools import Chunk, InMemoryRetriever, RetrievalRequest, Retriever
 from .schemas import (
+    CorpusCoverage,
     CreateReportRequest,
     ErrorResponse,
     HealthResponse,
     ReadyResponse,
     ReportState,
+    RetrieveRequest,
+    RetrieveResponse,
     ReviewRequest,
 )
 from .service import ReportService, RunNotAwaitingReviewError, RunNotFoundError
@@ -103,13 +106,19 @@ def build_retriever(settings: Settings, *, gateway: ModelGateway | None = None) 
             model=settings.embedding_model,
             dimensions=settings.embedding_dimensions,
         )
-    else:
-        # Explicit and loud: the stack works, but retrieval quality will be lexical.
+    elif settings.allow_hashing_embedder:
+        # An explicit opt-in, so this is a configuration choice rather than a fault --
+        # still logged, because retrieval will have no semantic recall.
         logger.warning(
-            "no embedding credentials; falling back to the hashing embedder. Retrieval "
-            "will have no semantic recall. Set GEMINI_API_KEY for real embeddings."
+            "using the deterministic hashing embedder by configuration "
+            "(AGENT_ALLOW_HASHING_EMBEDDER=true). Retrieval has no semantic recall."
         )
         embedder = HashingEmbedder(dimensions=settings.embedding_dimensions)
+    else:
+        raise ValueError(
+            "pgvector retrieval needs embeddings: set GEMINI_API_KEY, or set "
+            "AGENT_ALLOW_HASHING_EMBEDDER=true to accept the deterministic embedder"
+        )
 
     store = PgVectorStore(settings.postgres_dsn, dimensions=settings.embedding_dimensions)
     return HybridRetriever(
@@ -254,7 +263,7 @@ def create_app(
         }
         if not cfg.use_in_memory_retriever:
             # Only assert these when the service is actually configured to need them.
-            checks["embedding_credentials"] = cfg.has_embedding_credentials
+            checks["embeddings_configured"] = cfg.embeddings_satisfied
             checks["postgres_configured"] = cfg.postgres_configured
         if cfg.use_postgres_checkpointer:
             checks["durable_checkpointer"] = request.app.state.checkpoint_backend == "postgres"
@@ -287,6 +296,45 @@ def create_app(
             "active_model": request.app.state.gateway.active_model,
         }
 
+    @app.post("/v1/retrieve", response_model=RetrieveResponse, tags=["retrieval"])
+    async def retrieve(body: RetrieveRequest, request: Request) -> RetrieveResponse:
+        """
+        Retrieval only: no chat model is invoked.
+
+        Separating this from report generation is what lets retrieval metrics gate CI:
+        the deterministic embedder needs no credentials, so recall and nDCG can be
+        checked on every pull request without an API key or quota.
+        """
+        retriever: Retriever = request.app.state.retriever
+        result = await retriever.retrieve(RetrievalRequest(query=body.query, top_k=body.top_k))
+        describe = getattr(retriever, "describe", None)
+        return RetrieveResponse(
+            query=body.query,
+            citations=[c.citation() for c in result.chunks],
+            context=result.context,
+            chunks=len(result.chunks),
+            retrieved_chars=result.total_chars,
+            retriever=describe() if callable(describe) else type(retriever).__name__,
+        )
+
+    @app.get("/v1/corpus", response_model=CorpusCoverage, tags=["ops"])
+    async def corpus(request: Request) -> CorpusCoverage:
+        """
+        Report the indexed pages for the active tenant.
+
+        Read-only metadata (page numbers, not content), so it is safe to expose
+        alongside the other ops endpoints.
+        """
+        cfg: Settings = request.app.state.settings
+        retriever = request.app.state.retriever
+        reporter = getattr(retriever, "corpus_coverage", None)
+        sources: dict[str, list[int]] = await reporter() if callable(reporter) else {}
+        return CorpusCoverage(
+            tenant_id=cfg.tenant_id,
+            sources=sources,
+            total_pages=sum(len(pages) for pages in sources.values()),
+        )
+
     @app.post(
         "/v1/reports",
         response_model=ReportState,
@@ -300,7 +348,11 @@ def create_app(
         """
         thread_id = str(uuid.uuid4())
         return await service.start(
-            thread_id, body.question, top_k=body.top_k, max_revisions=body.max_revisions
+            thread_id,
+            body.question,
+            top_k=body.top_k,
+            max_revisions=body.max_revisions,
+            include_context=body.include_context,
         )
 
     @app.get("/v1/reports/{thread_id}", response_model=ReportState, tags=["reports"])

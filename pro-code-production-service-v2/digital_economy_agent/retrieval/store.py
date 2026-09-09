@@ -11,6 +11,7 @@ larger operational cost than the marginal vector performance difference at this 
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,124 @@ from psycopg.types.json import Jsonb
 from ..tools.types import Chunk
 
 _SCHEMA = Path(__file__).parent / "schema.sql"
+
+_TERM = re.compile(r"\b[a-zA-Z][a-zA-Z0-9-]{2,}\b")
+
+# Interrogatives and framing words carry no retrieval signal but, under conjunctive
+# tsquery semantics, every one of them must appear in a chunk for it to match.
+_QUERY_STOPWORDS = frozenset(
+    [
+        "about",
+        "across",
+        "after",
+        "against",
+        "all",
+        "also",
+        "and",
+        "any",
+        "are",
+        "around",
+        "because",
+        "been",
+        "before",
+        "being",
+        "between",
+        "both",
+        "but",
+        "can",
+        "could",
+        "describe",
+        "describes",
+        "did",
+        "does",
+        "doing",
+        "each",
+        "few",
+        "for",
+        "from",
+        "further",
+        "had",
+        "has",
+        "have",
+        "having",
+        "how",
+        "identified",
+        "into",
+        "its",
+        "itself",
+        "more",
+        "most",
+        "only",
+        "other",
+        "over",
+        "own",
+        "report",
+        "reports",
+        "said",
+        "same",
+        "say",
+        "says",
+        "should",
+        "some",
+        "such",
+        "than",
+        "that",
+        "the",
+        "their",
+        "them",
+        "then",
+        "there",
+        "these",
+        "they",
+        "this",
+        "those",
+        "through",
+        "under",
+        "until",
+        "very",
+        "was",
+        "were",
+        "what",
+        "when",
+        "where",
+        "which",
+        "while",
+        "who",
+        "whom",
+        "why",
+        "will",
+        "with",
+        "within",
+        "would",
+        "you",
+        "your",
+    ]
+)
+
+
+def lexical_query_terms(query: str) -> str:
+    """
+    Reduce a natural-language question to an OR-joined keyword query.
+
+    ``websearch_to_tsquery`` ANDs bare terms, so passing a whole question requires a
+    single chunk to contain every word including "how", "does" and "report" -- which
+    essentially never happens. Before this, the lexical half of hybrid retrieval
+    returned zero hits for every question-form query, so "hybrid" search was vector
+    search with extra steps. Found by the Phase 3 eval harness on its first live run.
+    """
+    terms = [
+        term
+        for term in (m.group(0).lower() for m in _TERM.finditer(query))
+        if term not in _QUERY_STOPWORDS
+    ]
+    # Deduplicate while preserving order, then OR so any content term can match.
+    seen: set[str] = set()
+    unique: list[str] = []
+    for term in terms:
+        if term not in seen:
+            seen.add(term)
+            unique.append(term)
+    return " OR ".join(unique)
 
 
 def content_hash(source: str, page: int | None, text: str) -> str:
@@ -193,7 +312,13 @@ class PgVectorStore:
         This is the half of hybrid retrieval that vectors are bad at: exact identifiers,
         acronyms and rare terms (``ASEAN DEFA``) where an embedding blurs the very token
         that makes the match correct.
+
+        The query is reduced to OR-joined content terms first -- see
+        ``lexical_query_terms`` for why passing the raw question matches nothing.
         """
+        reduced = lexical_query_terms(query)
+        if not reduced:
+            return []
         conn = await self._connect()
         try:
             async with conn.cursor() as cur:
@@ -207,7 +332,7 @@ class PgVectorStore:
                     ORDER BY rank DESC
                     LIMIT %s
                     """,
-                    (query, tenant_id, query, top_k),
+                    (reduced, tenant_id, reduced, top_k),
                 )
                 rows = await cur.fetchall()
         finally:
@@ -225,6 +350,33 @@ class PgVectorStore:
             )
             for i, r in enumerate(rows)
         ]
+
+    async def coverage(self, *, tenant_id: str = "default") -> dict[str, list[int]]:
+        """
+        Which pages of which sources are indexed.
+
+        Exposed because a retrieval metric is only valid if the corpus contains the
+        ground truth it is scored against. Without this, a case whose ground-truth
+        pages were never ingested scores recall 0 and reports an ingest gap as a
+        retriever failure -- the same error class as scoring groundedness against a
+        context too short to support the answer.
+        """
+        conn = await self._connect()
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    SELECT source, array_agg(DISTINCT page ORDER BY page) AS pages
+                    FROM chunks
+                    WHERE tenant_id = %s AND page IS NOT NULL
+                    GROUP BY source
+                    """,
+                    (tenant_id,),
+                )
+                rows = await cur.fetchall()
+        finally:
+            await conn.close()
+        return {r["source"]: [int(p) for p in r["pages"]] for r in rows}
 
     async def count(self, *, tenant_id: str = "default") -> int:
         conn = await self._connect()
