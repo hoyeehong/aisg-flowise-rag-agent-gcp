@@ -160,11 +160,115 @@ jobs:
       - name: Run the suite that does not need an orchestrator
         run: uv run pytest tests/unit -q
 
+  evals:
+    name: retrieval eval gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: quality
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: devpass
+          POSTGRES_DB: agent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d agent"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+
+    env:
+      DSN: postgresql://postgres:devpass@localhost:5432/agent
+      AGENT_POSTGRES_DSN: postgresql://postgres:devpass@localhost:5432/agent
+      AGENT_GROQ_API_KEY: not-needed-for-retrieval-only
+      AGENT_USE_IN_MEMORY_RETRIEVER: "false"
+      # Explicit opt-in to the deterministic embedder. This is what makes the eval a
+      # required check: retrieval quality is measured with no API key and no quota, so
+      # it cannot be flaky because a provider is rate limited.
+      AGENT_ALLOW_HASHING_EMBEDDER: "true"
+      AGENT_TENANT_ID: ci
+      AGENT_USE_POSTGRES_CHECKPOINTER: "false"
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: "0.11.26"
+          enable-cache: true
+          cache-dependency-glob: pro-code-production-service-v2/uv.lock
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev
+
+      - name: Ingest the corpus
+        # The same pipeline the service uses, with the deterministic embedder so the
+        # index is byte-identical on every run and the metrics below are reproducible.
+        run: |
+          uv run python -m digital_economy_agent.ingestion \
+            --dsn "$DSN" --tenant ci --allow-hashing-embedder \
+            ../data/imda_report.pdf
+
+      - name: Start the service
+        run: |
+          uv run uvicorn --factory digital_economy_agent.api.app:create_app \
+            --port 8000 --log-level warning > /tmp/service.log 2>&1 &
+          for i in $(seq 1 45); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/readyz || echo 000)
+            [ "$code" = "200" ] && { echo "ready after ${i}s"; exit 0; }
+            sleep 1
+          done
+          echo "::error::service never became ready"
+          curl -s http://localhost:8000/readyz || true
+          cat /tmp/service.log
+          exit 1
+
+      - name: Confirm the corpus covers the golden sets
+        # A recall figure is only meaningful over a corpus containing the ground truth.
+        # Without this the eval could silently pass on an empty index.
+        run: |
+          uv run python -c "
+          import json, sys, urllib.request
+          with urllib.request.urlopen('http://localhost:8000/v1/corpus', timeout=30) as r:
+              body = json.load(r)
+          pages = body.get('total_pages', 0)
+          print(f'indexed pages: {pages}')
+          if pages < 70:
+              sys.exit(f'::error::only {pages} pages indexed; ingest did not complete')
+          "
+
+      - name: Retrieval eval gate
+        # Fails the build on a regression beyond tolerance, or below an absolute floor.
+        run: |
+          uv run python -m evals.harness \
+            --target http://localhost:8000 \
+            --retrieval-only \
+            --dataset evals/golden/retrieval-anchored.v1.jsonl \
+            --baseline evals/baselines/retrieval-ci.json \
+            --out /tmp/eval-report.json \
+            --gate
+
+      - name: Upload the eval report
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: eval-report
+          path: /tmp/eval-report.json
+          if-no-files-found: warn
+
+      - name: Service logs on failure
+        if: failure()
+        run: cat /tmp/service.log
+
   image:
     name: container build
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [quality, optional-deps]
+    needs: [quality, optional-deps, evals]
 
     services:
       # The smoke test runs the image twice -- once without a database and once with --

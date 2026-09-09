@@ -177,3 +177,89 @@ async def test_shared_vocabulary_scores_higher_than_none():
     )
     dot = lambda x, y: sum(a * b for a, b in zip(x, y, strict=True))  # noqa: E731
     assert dot(base, near) > dot(base, far)
+
+
+# --- regressions found by the Phase 3 eval harness -------------------------
+
+
+def test_mmr_lambda_actually_controls_the_tradeoff():
+    """
+    Regression: MMR's lambda was inert.
+
+    RRF produces scores around 1/(60+rank) ~ 0.016 while redundancy is a 0-1 Jaccard,
+    so on the raw scale `lambda * relevance` was swamped by `(1-lambda) * redundancy`
+    and every lambda behaved like 0.0 -- pure diversity. That is the same scale
+    mismatch RRF itself avoids by fusing ranks rather than scores, reintroduced between
+    the two stages. Fused scores are now normalised before the trade-off.
+    """
+    shared = "digital trust cybersecurity responsible frameworks regional governance"
+    candidates = [
+        (Chunk(text=shared, source="a", page=1), 0.0164),
+        # A near-duplicate that is 8x more relevant than the distinct alternative.
+        (Chunk(text=shared + " addendum", source="a", page=2), 0.0164),
+        (Chunk(text="entirely different talent pipeline shortages", source="a", page=3), 0.0020),
+    ]
+    diverse = [c.page for c, _ in maximal_marginal_relevance(candidates, top_k=2, lambda_=0.1)]
+    relevant = [c.page for c, _ in maximal_marginal_relevance(candidates, top_k=2, lambda_=0.9)]
+
+    assert diverse == [1, 3], "low lambda must prefer the distinct passage"
+    assert relevant == [1, 2], "high lambda must prefer the far more relevant duplicate"
+    assert diverse != relevant, "lambda must change the outcome at all"
+
+
+def test_mmr_is_scale_invariant():
+    """The same ranking, scaled, must select the same passages."""
+    shared = "digital trust cybersecurity responsible frameworks"
+
+    def build(scale: float):
+        return [
+            (Chunk(text=shared, source="a", page=1), 1.0 * scale),
+            (Chunk(text=shared + " addendum", source="a", page=2), 0.98 * scale),
+            (Chunk(text="unrelated talent pipeline shortages", source="a", page=3), 0.10 * scale),
+        ]
+
+    tiny = [c.page for c, _ in maximal_marginal_relevance(build(0.016), top_k=2, lambda_=0.8)]
+    large = [c.page for c, _ in maximal_marginal_relevance(build(100.0), top_k=2, lambda_=0.8)]
+    assert tiny == large
+
+
+@pytest.mark.parametrize(
+    ("query", "must_include", "must_exclude"),
+    [
+        (
+            "How does the report address cross-border data flows?",
+            ["cross-border", "data", "flows"],
+            # Interrogatives and framing nouns are the ones that mattered: under the
+            # old AND semantics each had to appear in a chunk for it to match at all.
+            ["how", "does", "the", "report"],
+        ),
+        (
+            "What are the key enablers for sustainable digital development?",
+            ["enablers", "sustainable", "digital"],
+            ["what", "are", "the", "for"],
+        ),
+        ("DEFA", ["defa"], []),
+    ],
+)
+def test_lexical_query_reduction(query, must_include, must_exclude):
+    """
+    Regression: the whole question was passed to a conjunctive tsquery.
+
+    Every framing word then had to appear in a chunk for it to match, so real queries
+    returned nothing lexically.
+    """
+    from digital_economy_agent.retrieval.store import lexical_query_terms
+
+    terms = lexical_query_terms(query).split(" OR ")
+    for term in must_include:
+        assert term in terms, f"{term!r} missing from {terms}"
+    for term in must_exclude:
+        assert term not in terms, f"{term!r} should have been dropped from {terms}"
+
+
+def test_lexical_query_reduction_handles_pure_stopwords():
+    """A query of only framing words yields no terms, and the caller must not query."""
+    from digital_economy_agent.retrieval.store import lexical_query_terms
+
+    assert lexical_query_terms("what does the report say about it?") == ""
+    assert lexical_query_terms("") == ""

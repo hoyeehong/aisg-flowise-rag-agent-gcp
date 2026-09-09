@@ -85,6 +85,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("AGENT_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"),
     )
     tenant_id: str = "default"
+    # Opting in to the deterministic embedder is a configuration decision, not a
+    # degradation: it is how retrieval is evaluated in CI without an API key. Left
+    # false, a missing embedding credential correctly reports the service as degraded,
+    # so an operator who *meant* to have embeddings still gets a signal.
+    allow_hashing_embedder: bool = False
 
     # --- hybrid search ---------------------------------------------------------
     retrieval_candidate_multiplier: int = Field(default=4, ge=1, le=20)
@@ -128,8 +133,19 @@ class Settings(BaseSettings):
 
     @property
     def has_embedding_credentials(self) -> bool:
-        """Whether real embeddings are available. Required for pgvector retrieval."""
+        """Whether real embeddings are available."""
         return bool(self.gemini_api_key.get_secret_value())
+
+    @property
+    def embeddings_satisfied(self) -> bool:
+        """
+        Whether the embedding configuration is coherent, which is what readiness needs.
+
+        Satisfied by either a real credential or an explicit opt-in to the deterministic
+        embedder. Asserting the credential unconditionally would mark a deliberately
+        quota-free deployment as degraded.
+        """
+        return self.has_embedding_credentials or self.allow_hashing_embedder
 
     @property
     def postgres_configured(self) -> bool:

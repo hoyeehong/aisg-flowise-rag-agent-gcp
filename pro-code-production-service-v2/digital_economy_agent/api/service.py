@@ -49,7 +49,14 @@ class ReportService:
     def _config(self, thread_id: str) -> RunnableConfig:
         return {"configurable": {"thread_id": thread_id}}
 
-    def _project(self, thread_id: str, values: dict[str, Any], *, paused: bool) -> ReportState:
+    def _project(
+        self,
+        thread_id: str,
+        values: dict[str, Any],
+        *,
+        paused: bool,
+        include_context: bool = False,
+    ) -> ReportState:
         """Build the external view of a run from raw graph state."""
         status: RunStatus
         if paused:
@@ -67,6 +74,7 @@ class ReportService:
             final_report=values.get("final_report", ""),
             citations=values.get("citations", []),
             retrieved_chars=values.get("retrieved_chars", 0),
+            context=values.get("context", "") if include_context else "",
             revisions_used=values.get("revisions", 0),
             revisions_allowed=values.get("max_revisions", self._max_revisions),
             feedback_history=values.get("feedback_history", []),
@@ -86,6 +94,7 @@ class ReportService:
         *,
         top_k: int | None = None,
         max_revisions: int | None = None,
+        include_context: bool = False,
     ) -> ReportState:
         """Run until the review gate (or to completion, if no gate is reached)."""
         await self._graph.ainvoke(
@@ -96,7 +105,7 @@ class ReportService:
             },
             config=self._config(thread_id),
         )
-        return await self.get(thread_id)
+        return await self.get(thread_id, include_context=include_context)
 
     async def review(self, thread_id: str, action: ReviewAction, feedback: str) -> ReportState:
         """Resume a paused run with a human verdict."""
@@ -116,7 +125,7 @@ class ReportService:
         )
         return await self.get(thread_id)
 
-    async def get(self, thread_id: str) -> ReportState:
+    async def get(self, thread_id: str, *, include_context: bool = False) -> ReportState:
         """
         Current state of a run.
 
@@ -129,4 +138,9 @@ class ReportService:
         snapshot = await self._graph.aget_state(self._config(thread_id))
         if not snapshot.created_at:
             raise RunNotFoundError(thread_id)
-        return self._project(thread_id, snapshot.values, paused=bool(snapshot.next))
+        return self._project(
+            thread_id,
+            snapshot.values,
+            paused=bool(snapshot.next),
+            include_context=include_context,
+        )

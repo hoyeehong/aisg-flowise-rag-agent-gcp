@@ -157,7 +157,7 @@ async def test_readyz_asserts_retrieval_deps_only_when_pgvector_selected(retriev
 
     assert response.status_code == 200, "irrelevant checks must not degrade readiness"
     checks = response.json()["checks"]
-    assert "embedding_credentials" not in checks
+    assert "embeddings_configured" not in checks
     assert "postgres_configured" not in checks
 
 

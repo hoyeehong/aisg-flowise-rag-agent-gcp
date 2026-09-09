@@ -1,9 +1,10 @@
 # v2 — Pro-Code Production Service
 
-**Status:** Phases 1 and 2 delivered — the service runs on pgvector hybrid retrieval
-with a durable review gate, is `mypy --strict` clean, and is covered by 98 tests.
-Phases 3–5 remain design-stage; the naming conventions below were fixed first so the
-code landed in the right shape rather than being reorganised later.
+**Status:** Phases 1–3 delivered — the service runs on pgvector hybrid retrieval with a
+durable review gate, is `mypy --strict` clean, is covered by 148 tests, and has a
+retrieval eval gating every pull request. Phases 4–5 remain design-stage; the naming
+conventions below were fixed first so the code landed in the right shape rather than
+being reorganised later.
 
 v2 re-platforms the [v1 Flowise prototype](../low-code-rapid-prototype-v1/README.md) as a
 code-owned service: a typed API over a LangGraph agent, a RAG pipeline declared in code rather
@@ -56,11 +57,11 @@ pro-code-production-service-v2/
 │   ├── ingestion/                  ✓ PII redaction, idempotent pipeline, Prefect flow, CLI
 │   └── observability/              ✓ package placeholder; OTel + Prometheus land in P4
 ├── tests/
-│   ├── unit/                       ✓ graph transitions, gateway taxonomy
+│   ├── unit/                       ✓ graph transitions, gateway taxonomy, harness metrics
 │   ├── integration/                ✓ real routes + real graph, scripted providers
 │   └── load/                       — k6 / Locust scenarios (P4)
 ├── docker-compose.yml              ✓ local pgvector dependency
-├── evals/                          — golden sets + harness against the live API (P3)
+├── evals/                          ✓ golden sets, live-API harness, gate, baseline
 ├── infra/terraform/                — one module per resource group (P4)
 ├── charts/digital-economy-agent/   — Helm chart, matches the K8s object name (P4)
 ├── Dockerfile                      ✓ multi-stage, non-root, healthcheck
@@ -124,6 +125,89 @@ One case per line, each carrying `case_id`, `query`, `expected_sources`, `refere
 so a score is always attributable to an exact dataset revision.
 
 ---
+
+## 5. What Phase 3 delivered
+
+An evaluation harness that scores the **running service over HTTP**, and gates pull
+requests on retrieval quality. Full detail in [`evals/README.md`](evals/README.md).
+
+### It found two real bugs on its first live run
+
+Both were shipped in Phase 2, and both were invisible to 104 passing tests. This is the
+argument for Phase 3 in one paragraph.
+
+* **The lexical half of hybrid retrieval never fired.** `websearch_to_tsquery` ANDs bare
+  terms, so passing a whole question required a single chunk to contain every word
+  including "how", "does" and "report". Every question-form query returned zero lexical
+  hits, making "hybrid" search vector search with extra steps. Phase 2 documented the
+  conjunctive behaviour and even wrote a test for it — without connecting that it made
+  the retriever inert.
+* **MMR's `lambda` was inert.** RRF scores are around `1/(60+rank)` ≈ 0.016 while
+  redundancy is a 0–1 Jaccard, so `lambda * relevance` was swamped and every lambda
+  behaved like pure diversity. That is the same scale mismatch RRF avoids internally by
+  fusing ranks rather than scores — reintroduced between the two stages.
+
+Together they moved one case's recall from 0.000 to 1.000. Disabling the lexical half
+now measurably costs 0.10 normalised recall; before the fix it cost nothing.
+
+### Preconditions, not scores
+
+The harness refuses to produce a number when the setup cannot support it. Each of these
+was added because the first run hit it:
+
+| Condition | Response |
+| :--- | :--- |
+| Ground truth not in the index | Retrieval **not scored** for that case. Three of ten anchored cases hit this; scoring 0 would report an ingest gap as a retriever failure. |
+| Fewer than 90% of cases completed | Run is **unusable**, not failed. The first run had 8 of 10 return 503 from a rate-limited provider. |
+| Dataset fingerprint or judge model differs from baseline | **Unusable**. Otherwise a dataset change reads as a system regression. |
+| Judge call fails | Fatal. Never a substituted score — the v1 defect. |
+| Context shorter than half the answer | Groundedness flagged unmeasurable (the Phase 0 lesson). |
+
+### `recall_normalised`, not raw recall
+
+Raw `recall@k` is bounded by `k/|expected|`: with 19 relevant pages and `k=5` it cannot
+exceed 0.26. One case scored a raw 0.385 that was really a perfect 1.000 — it retrieved
+every page it could. The gate uses the ceiling-normalised value, which is comparable
+across cases; a floor on raw recall would have failed a healthy retriever.
+
+### The CI gate
+
+A new `evals` job ingests the corpus with the **deterministic embedder**, starts the
+service, verifies the corpus covers the golden sets, and runs the harness in
+`--retrieval-only` mode against a committed baseline. No chat model is invoked, so it
+needs no API key and no quota and cannot be flaky because a provider is rate limited.
+Two consecutive runs are byte-identical.
+
+Verified by deliberately degrading retrieval (lexical weight 0): the gate caught it as
+both a floor violation and a regression across all five retrieval metrics.
+
+### Also in this phase
+
+* `POST /v1/retrieve` — retrieval without generation, which is what makes the metrics
+  gateable for free.
+* `GET /v1/corpus` — indexed pages per source, so coverage is checkable.
+* `include_context` on `POST /v1/reports` — the judge must see the context the model
+  saw; scoring groundedness against an empty string would be vacuous.
+* The deterministic embedder is now an **explicit opt-in**
+  (`AGENT_ALLOW_HASHING_EMBEDDER`) rather than an implicit fallback on a missing key, so
+  a quota-free deployment is genuinely *ready* while a real misconfiguration still
+  reports *degraded*.
+* Reports are written to timestamped paths. The v1 runner wrote to a fixed filename, so
+  any run silently overwrote the published baseline — which happened during Phase 2.
+* Integration tests now delete their tenants; they had leaked 770 rows across 130+ dead
+  tenants.
+
+### Phase 3 limitations
+
+* **No real-model baseline.** Groq's free tier allows 8k tokens/minute against ~2.5k per
+  report, so a 24-case live run exceeds the budget. Generation metrics are therefore
+  ungated and exercised manually; CI gates retrieval and the harness's own correctness.
+* **`policy-analysis.v1.jsonl` carries no retrieval ground truth** — v1's curated context
+  is a synthesised summary that matched no page above 38%, so fabricating
+  `expected_pages` would make recall a measurement of guesses.
+* **Refusal detection is a phrase heuristic**, deliberately broad.
+* **RRF `k` and the fusion weights are still untuned.** The golden set now exists to fit
+  them, but 10 anchored cases is thin; the roadmap's ~40 is the right target.
 
 ## 5. What Phase 2 delivered
 
@@ -361,7 +445,7 @@ Phases are unchanged from the review; the naming above is what each one lands in
 | 0 ✓ | Truth pass — remove score floors, fix the dead gate, reconcile Groq/Gemini, correct deploy IAM | `../low-code-rapid-prototype-v1/` |
 | 1 ✓ | FastAPI + LangGraph service, Dockerfile, pytest, CI | `api/`, `agents/`, `gateway/`, `tools/`, `tests/` |
 | 2 ✓ | pgvector hybrid retrieval + Prefect ingestion with PII redaction | `retrieval/`, `ingestion/` |
-| 3 | Eval harness against the live API, wired as a required PR check | `evals/` |
+| 3 ✓ | Eval harness against the live API, wired as a required PR check | `evals/` |
 | 4 | Terraform, Helm, OTel + Prometheus, Trivy/SBOM/signing | `infra/`, `charts/`, `observability/` |
 | 5 | *(optional)* Kafka/Pub-Sub consumer, tenant isolation via Postgres RLS | `ingestion/`, `api/` |
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from collections.abc import Iterator
 
 import pytest
 
@@ -72,9 +73,25 @@ CORPUS = [
 
 
 @pytest.fixture
-def tenant() -> str:
-    """A unique tenant per test, so cases cannot see each other's rows."""
-    return f"test-{uuid.uuid4().hex[:12]}"
+def tenant() -> Iterator[str]:
+    """
+    A unique tenant per test, deleted afterwards.
+
+    Cleanup matters: without it every run left its rows behind, and a local database
+    accumulated 130+ dead tenants over the course of Phase 2 and 3. That is slow, and
+    it makes ad-hoc inspection of the table useless.
+    """
+    name = f"test-{uuid.uuid4().hex[:12]}"
+    yield name
+    try:
+        import psycopg
+
+        with psycopg.connect(DSN, connect_timeout=5) as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM chunks WHERE tenant_id = %s", (name,))
+            conn.commit()
+    except Exception:
+        # Cleanup failure must not fail a passing test; the next run reuses no ids.
+        pass
 
 
 @pytest.fixture
@@ -178,17 +195,43 @@ async def test_lexical_search_returns_empty_for_absent_terms(seeded):
     assert await store.lexical_search("maritime shipping tariffs", top_k=5, tenant_id=tenant) == []
 
 
-async def test_lexical_search_is_conjunctive(seeded):
+async def test_lexical_search_reduces_natural_language_queries(seeded):
     """
-    ``websearch_to_tsquery`` ANDs its terms, so a multi-term query only matches a chunk
-    containing all of them. That makes lexical recall narrow on paraphrased questions --
-    a real limitation, and precisely why fusion pairs it with vector search rather than
-    choosing between them.
+    A question-form query must still match lexically.
+
+    ``websearch_to_tsquery`` ANDs bare terms, so passing a whole question required a
+    single chunk to contain every word including "how", "does" and "report" -- which
+    essentially never happens. The lexical half of hybrid retrieval therefore returned
+    zero hits for every real query, making "hybrid" search vector search with extra
+    steps. The Phase 3 eval harness caught it on its first live run.
     """
     store, _, tenant = seeded
-    assert await store.lexical_search("cybersecurity", top_k=5, tenant_id=tenant)
-    # 'cybersecurity' and 'talent' appear in different chunks, never together.
-    assert await store.lexical_search("cybersecurity talent", top_k=5, tenant_id=tenant) == []
+    hits = await store.lexical_search(
+        "How does the report address digital trust and cybersecurity?",
+        top_k=5,
+        tenant_id=tenant,
+    )
+    assert hits, "a question-form query must not return zero lexical hits"
+    assert 18 in [h.chunk.page for h in hits]
+
+
+async def test_lexical_terms_are_disjunctive(seeded):
+    """Any content term may match; requiring all of them is what broke question queries."""
+    store, _, tenant = seeded
+    # 'cybersecurity' and 'talent' never co-occur in a chunk of this corpus.
+    hits = await store.lexical_search("cybersecurity talent", top_k=5, tenant_id=tenant)
+    pages = {h.chunk.page for h in hits}
+    assert pages & {18, 23}, f"expected a match on either term, got {pages}"
+
+
+async def test_lexical_search_ignores_framing_words(seeded):
+    """Interrogatives carry no signal and, when ANDed, actively suppress matches."""
+    from digital_economy_agent.retrieval.store import lexical_query_terms
+
+    reduced = lexical_query_terms("What does the report say about digital talent?")
+    assert "digital" in reduced and "talent" in reduced
+    for noise in ("what", "does", "the", "report", "say", "about"):
+        assert noise not in reduced.split(" OR "), f"{noise!r} should be dropped"
 
 
 async def test_vector_search_orders_by_similarity(seeded):
