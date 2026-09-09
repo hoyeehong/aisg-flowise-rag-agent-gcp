@@ -197,6 +197,9 @@ jobs:
           if-no-files-found: warn
 
   optional-deps:
+    # NOTE: this display name is a required status check in the 'main protection'
+    # ruleset. Renaming it leaves the ruleset waiting on a name nothing reports, and
+    # the pull request blocks as pending forever. Change both together or neither.
     name: prefect stays optional
     runs-on: ubuntu-latest
     timeout-minutes: 8
@@ -212,24 +215,41 @@ jobs:
           enable-cache: true
           cache-dependency-glob: pro-code-production-service-v2/uv.lock
 
-      - name: Install WITHOUT the ingestion extra
+      - name: Install WITHOUT the ingestion or events extras
         run: uv sync --frozen --extra dev
 
-      - name: Assert the service works with no orchestrator installed
-        # The claim is that Prefect is optional and the API image need not carry it.
-        # A comment asserting that is worth nothing; this proves it.
+      - name: Assert the service works with no orchestrator and no broker client
+        # The claim is that Prefect and the Pub/Sub client are optional, and that the
+        # API image need not carry either. A comment asserting that is worth nothing;
+        # this proves it.
         run: |
           uv run python -c "
           import importlib.util, sys
-          if importlib.util.find_spec('prefect') is not None:
-              sys.exit('::error::prefect is installed; this job must run without it')
+          for module in ('prefect', 'google.pubsub_v1'):
+              if importlib.util.find_spec(module) is not None:
+                  sys.exit(f'::error::{module} is installed; this job must run without it')
 
           from digital_economy_agent.api.app import create_app
           from digital_economy_agent.ingestion import ingest_pages, PatternRedactor
           from digital_economy_agent.ingestion.flow import PREFECT_AVAILABLE, ingest_corpus_flow
           assert PREFECT_AVAILABLE is False, 'flow.py should report prefect missing'
           assert callable(ingest_corpus_flow), 'flow must stay callable via the shims'
-          print('service and ingestion pipeline import cleanly without prefect')
+
+          # The consumer and its handler must be usable with no broker client at all:
+          # they are tested against the in-memory broker, and the Pub/Sub adapter is
+          # one implementation of the protocol rather than a dependency of it.
+          from digital_economy_agent.messaging import MessageConsumer, InMemorySubscriber
+          from digital_economy_agent.messaging import DocumentIngestionHandler
+
+          # Importing the adapter must not require the client either -- only calling it.
+          from digital_economy_agent.messaging import pubsub
+          try:
+              pubsub._clients()
+          except ImportError as exc:
+              assert 'uv sync --extra events' in str(exc), f'unhelpful error: {exc}'
+          else:
+              sys.exit('::error::pubsub._clients() succeeded without google-cloud-pubsub')
+          print('service, ingestion and consumer import cleanly without either extra')
           "
 
       - name: Run the suite that does not need an orchestrator

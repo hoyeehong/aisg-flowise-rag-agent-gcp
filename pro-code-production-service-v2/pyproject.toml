@@ -35,6 +35,11 @@ dev = [
 ingestion = [
     "prefect>=3.0",
 ]
+# The event consumer. Optional for the same reason Prefect is: the HTTP service does
+# not need a broker client, and the runtime image should not carry one it will not use.
+events = [
+    "google-cloud-pubsub>=2.23",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -55,6 +60,13 @@ python_version = "3.11"
 strict = true
 warn_unused_ignores = true
 disallow_untyped_defs = true
+
+# google-cloud-pubsub ships no py.typed marker, so its generated clients are untyped.
+# Scoped to that module rather than relaxing strictness globally: the adapter around it
+# is fully annotated, and this is the one boundary where the types stop.
+[[tool.mypy.overrides]]
+module = ["google.pubsub_v1.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -286,11 +286,14 @@ async def test_upsert_reports_inserts_then_updates(store, tenant):
     emb = HashingEmbedder()
     vectors = await emb.embed([c.text for c in CORPUS], task=EmbedTask.DOCUMENT)
 
-    inserted, updated = await store.upsert(CORPUS, vectors, embedder=emb.name, tenant_id=tenant)
-    assert (inserted, updated) == (len(CORPUS), 0)
+    first = await store.upsert(CORPUS, vectors, embedder=emb.name, tenant_id=tenant)
+    assert (first.inserted, first.updated, first.skipped) == (len(CORPUS), 0, 0)
 
-    inserted, updated = await store.upsert(CORPUS, vectors, embedder=emb.name, tenant_id=tenant)
-    assert (inserted, updated) == (0, len(CORPUS)), "re-ingest must update, not duplicate"
+    second = await store.upsert(CORPUS, vectors, embedder=emb.name, tenant_id=tenant)
+    assert (second.inserted, second.updated) == (0, len(CORPUS)), (
+        "re-ingest must update, not duplicate"
+    )
+    assert second.skipped == 0, "no version information means every write applies"
     assert await store.count(tenant_id=tenant) == len(CORPUS)
 
 

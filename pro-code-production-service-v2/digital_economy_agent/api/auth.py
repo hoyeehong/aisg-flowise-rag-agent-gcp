@@ -16,12 +16,13 @@ algorithm is rejected at startup instead of silently doing something weaker.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import jwt
 from fastapi import HTTPException, status
+
+from ..tenancy import is_valid_tenant_id
 
 if TYPE_CHECKING:
     from ..config import Settings
@@ -31,12 +32,6 @@ if TYPE_CHECKING:
 # output, because a shorter one can be brute-forced offline from a single valid token.
 # PyJWT only warns about this, so the check is enforced here.
 SUPPORTED_ALGORITHMS = {"HS256": 32, "HS384": 48, "HS512": 64}
-
-# The tenant becomes a Postgres setting and part of a unique key, so keep it to a
-# conservative shape. Parameterised queries make this not an injection defence; it is
-# there so a malformed claim fails loudly instead of resolving to a tenant that exists
-# but is not the caller's.
-_TENANT_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 @dataclass(frozen=True)
@@ -186,7 +181,7 @@ class TenantResolver:
 
     def _tenant_from(self, claims: dict[str, Any]) -> str:
         raw = claims.get(self._claim)
-        if not isinstance(raw, str) or not _TENANT_PATTERN.match(raw):
+        if not is_valid_tenant_id(raw):
             # 403, not 401: the credential is genuine, it just does not authorise any
             # tenant. Retrying with the same token will not help.
             raise HTTPException(

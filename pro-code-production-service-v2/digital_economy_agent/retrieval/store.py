@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -161,6 +162,26 @@ def content_hash(source: str, page: int | None, text: str) -> str:
     digest.update(b"\x00")
     digest.update(text.encode("utf-8"))
     return digest.hexdigest()
+
+
+@dataclass(frozen=True)
+class UpsertOutcome:
+    """
+    What an upsert did, per chunk.
+
+    Three outcomes rather than two because a conditional ``DO UPDATE`` can decline:
+    ``skipped`` counts rows whose stored version was newer than the incoming one. A
+    two-value return would have folded those into "updated" and reported a successful
+    write that never happened.
+    """
+
+    inserted: int
+    updated: int
+    skipped: int
+
+    @property
+    def written(self) -> int:
+        return self.inserted + self.updated
 
 
 @dataclass(frozen=True)
@@ -349,13 +370,22 @@ class PgVectorStore:
         embedder: str,
         tenant_id: str,
         redactions: list[dict[str, int]] | None = None,
-    ) -> tuple[int, int]:
+        source_updated_at: datetime | None = None,
+    ) -> UpsertOutcome:
         """
         Insert or update chunks by ``(tenant_id, content_hash)``.
 
-        Returns ``(inserted, updated)``. Re-ingesting an unchanged document reports
-        zero inserts, which is the signal that the pipeline is genuinely idempotent
-        rather than merely not crashing.
+        Re-ingesting an unchanged document reports zero inserts, which is the signal
+        that the pipeline is genuinely idempotent rather than merely not crashing.
+
+        ``source_updated_at`` guards against a late-arriving older version replacing a
+        newer row for the same chunk: event streams deliver at-least-once and order
+        only partially, so a redelivered v1 can arrive after v2. Omitted, every write
+        applies -- the previous behaviour, which batch ingestion still relies on.
+
+        This guard covers identical content only, since that is the only case that
+        reaches ON CONFLICT. Chunks removed by a newer version are not deleted; that
+        needs document reconciliation, which is not implemented.
         """
         if len(chunks) != len(embeddings):
             raise ValueError(f"chunk/embedding count mismatch: {len(chunks)} vs {len(embeddings)}")
@@ -366,20 +396,29 @@ class PgVectorStore:
             )
 
         marks = redactions or [{} for _ in chunks]
-        inserted = 0
+        inserted = updated = 0
         async with self._session(tenant_id) as cur:
             for chunk, embedding, redaction in zip(chunks, embeddings, marks, strict=True):
                 await cur.execute(
                     """
                     INSERT INTO chunks
                         (content_hash, tenant_id, source, page, text,
-                         embedding, embedder, redactions)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                         embedding, embedder, redactions, source_updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (tenant_id, content_hash) DO UPDATE SET
-                        embedding   = EXCLUDED.embedding,
-                        embedder    = EXCLUDED.embedder,
-                        redactions  = EXCLUDED.redactions,
-                        ingested_at = now()
+                        embedding         = EXCLUDED.embedding,
+                        embedder          = EXCLUDED.embedder,
+                        redactions        = EXCLUDED.redactions,
+                        source_updated_at = EXCLUDED.source_updated_at,
+                        ingested_at       = now()
+                    -- Decline the update when the stored version is newer. Either side
+                    -- being NULL means there is no version information, so the write
+                    -- applies: batch ingestion must keep working unchanged. `>=` rather
+                    -- than `>` so a redelivery of the same version still converges,
+                    -- which matters if the embedder changed under it.
+                    WHERE EXCLUDED.source_updated_at IS NULL
+                       OR chunks.source_updated_at IS NULL
+                       OR EXCLUDED.source_updated_at >= chunks.source_updated_at
                     RETURNING (xmax = 0) AS was_inserted
                     """,
                     (
@@ -391,12 +430,51 @@ class PgVectorStore:
                         embedding,
                         embedder,
                         Jsonb(redaction),
+                        source_updated_at,
                     ),
                 )
+                # A declined conditional update returns no row at all, which is how a
+                # stale write is distinguished from an applied one.
                 row = await cur.fetchone()
-                if row and row["was_inserted"]:
+                if row is None:
+                    continue
+                if row["was_inserted"]:
                     inserted += 1
-        return inserted, len(chunks) - inserted
+                else:
+                    updated += 1
+        return UpsertOutcome(
+            inserted=inserted, updated=updated, skipped=len(chunks) - inserted - updated
+        )
+
+    async def existing_hashes(
+        self, hashes: Sequence[str], *, tenant_id: str, embedder: str
+    ) -> set[str]:
+        """
+        Which of ``hashes`` are already stored for this tenant, by this embedder.
+
+        The point is to avoid paying for an embedding that will be discarded. Content
+        hashing already made ingestion idempotent at the storage layer, but the hash is
+        computed at insert time -- so a redelivered message re-embedded every chunk
+        first, then upserted it to no effect. Under at-least-once delivery that is a
+        recurring bill and a recurring hit against the embedding provider's quota, not
+        a one-off.
+
+        ``embedder`` is part of the question, not a detail: the same text embedded by a
+        different model is a different vector, so a row written by another embedder
+        must not be treated as present.
+        """
+        if not hashes:
+            return set()
+        async with self._session(tenant_id) as cur:
+            await cur.execute(
+                """
+                SELECT content_hash FROM chunks
+                WHERE tenant_id = %s AND embedder = %s AND content_hash = ANY(%s)
+                """,
+                (tenant_id, embedder, list(hashes)),
+            )
+            rows = await cur.fetchall()
+        return {r["content_hash"] for r in rows}
 
     async def vector_search(
         self, embedding: list[float], *, top_k: int, tenant_id: str

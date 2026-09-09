@@ -19,6 +19,25 @@ CREATE TABLE IF NOT EXISTS chunks (
     UNIQUE (tenant_id, content_hash)
 );
 
+-- When the *source document* was last changed, as asserted by whoever published the
+-- ingestion event. Distinct from ingested_at, which records when this row was written.
+-- Nullable: batch ingestion has no such notion, and a NULL on either side of the
+-- comparison below means "no version information", so the write applies.
+--
+-- Added by ALTER rather than in the CREATE TABLE above so an existing database picks it
+-- up too; IF NOT EXISTS keeps ensure_schema() idempotent.
+--
+-- What it guards: the conditional DO UPDATE in PgVectorStore.upsert, so a redelivered
+-- older version cannot replace a newer row for the same chunk. Kafka orders per
+-- partition and Pub/Sub only with ordering keys, so v1 arriving after v2 is normal.
+--
+-- What it does NOT guard: chunks a newer version deleted. Edited text hashes
+-- differently, so it inserts as its own row and never reaches ON CONFLICT -- a
+-- superseded version's chunks are added alongside the current ones. Removing them
+-- needs document reconciliation, which is not implemented; see the README limitations
+-- and test_a_superseded_version_leaves_its_chunks_behind.
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS source_updated_at TIMESTAMPTZ;
+
 -- Vector search. HNSW over cosine distance; embeddings are stored unit-normalised so
 -- `<=>` is a true cosine distance.
 CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw
