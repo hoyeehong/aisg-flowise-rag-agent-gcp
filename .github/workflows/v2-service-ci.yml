@@ -666,6 +666,12 @@ jobs:
           [ "$ready" = "503" ] || { echo "::error::readiness should be 503 with no database, got $ready"; exit 1; }
           echo "$body" | grep -q '"durable_checkpointer":false' \
             || { echo "::error::readyz did not name the failing check"; exit 1; }
+          # This container was started without AGENT_ALLOW_ANONYMOUS_TENANT and without
+          # a signing secret, so it cannot establish who is asking. The image must ship
+          # fail-closed: serving the configured tenant to any caller who finds the URL
+          # is the failure this asserts against.
+          echo "$body" | grep -q '"tenant_resolution":false' \
+            || { echo "::error::image did not fail closed on tenant resolution"; exit 1; }
           docker rm -f agent-degraded
 
       - name: Smoke test the image — ready with a database
@@ -676,6 +682,7 @@ jobs:
           docker run -d --name agent-ready --network host \
             -e AGENT_GROQ_API_KEY=ci-dummy \
             -e AGENT_POSTGRES_DSN=postgresql://postgres:devpass@localhost:5432/agent \
+            -e AGENT_ALLOW_ANONYMOUS_TENANT=true \
             digital-economy-agent:${{ github.sha }}
           for i in $(seq 1 45); do
             code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/readyz || echo 000)
