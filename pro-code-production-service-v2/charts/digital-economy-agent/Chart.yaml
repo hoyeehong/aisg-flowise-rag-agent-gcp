@@ -1,0 +1,10 @@
+apiVersion: v2
+name: digital-economy-agent
+description: Multi-agent RAG service with a human-in-the-loop review gate
+type: application
+# Chart version moves with the packaging; appVersion tracks the service release.
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.27.0-0"
+maintainers:
+  - name: Yeehong Ho

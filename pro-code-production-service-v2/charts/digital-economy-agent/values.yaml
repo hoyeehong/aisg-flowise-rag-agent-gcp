@@ -1,0 +1,125 @@
+# Defaults are production-shaped rather than convenient: no `latest` tag, resources
+# always set, non-root enforced, and the model credential referenced from an existing
+# Secret rather than templated into the release.
+
+image:
+  repository: digital-economy-agent
+  # Pin by digest in production. A mutable tag means a pod restart can silently pull
+  # different bits than its siblings are running.
+  tag: ""            # defaults to .Chart.AppVersion
+  digest: ""         # e.g. sha256:...; takes precedence over tag when set
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+serviceAccount:
+  create: true
+  name: ""
+  # On GKE, bind a Google service account here for Workload Identity rather than
+  # mounting a key file.
+  annotations: {}
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+# Requests and limits are both set deliberately. Without requests the scheduler cannot
+# place the pod sensibly and the HPA has no denominator for CPU utilisation; without
+# limits one pod can starve its neighbours.
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  # Scale-down is deliberately slow. A run paused at the human review gate lives in
+  # Postgres, so it survives eviction -- but an in-flight report does not, and a report
+  # takes seconds of model time that would be paid for twice.
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+    scaleUp:
+      stabilizationWindowSeconds: 30
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Probe paths match the service's own semantics: readiness returns 503 when degraded so
+# traffic drains, while liveness stays 200 whenever the process is up -- restarting
+# cannot conjure a missing database.
+probes:
+  liveness:
+    path: /healthz
+    initialDelaySeconds: 5
+    periodSeconds: 15
+    timeoutSeconds: 3
+    failureThreshold: 3
+  readiness:
+    path: /readyz
+    initialDelaySeconds: 3
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 2
+  startup:
+    path: /healthz
+    periodSeconds: 3
+    # 60 * 3s: generous, because the first start applies the pgvector schema and the
+    # checkpointer migrations. A tight startup probe would restart-loop through it.
+    failureThreshold: 60
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+# Non-secret configuration, rendered into a ConfigMap.
+config:
+  AGENT_ENVIRONMENT: production
+  AGENT_LOG_LEVEL: INFO
+  AGENT_USE_IN_MEMORY_RETRIEVER: "false"
+  AGENT_USE_POSTGRES_CHECKPOINTER: "true"
+  AGENT_MODEL_CHAIN: "openai/gpt-oss-20b,llama-3.3-70b-versatile"
+  AGENT_EMBEDDING_MODEL: gemini-embedding-001
+  AGENT_EMBEDDING_DIMENSIONS: "768"
+  AGENT_DEFAULT_TOP_K: "5"
+  AGENT_MAX_REVISIONS: "3"
+
+# Secrets are referenced, never templated. Putting a credential in values.yaml puts it
+# in `helm get values`, in CI logs, and in every developer's shell history.
+existingSecret:
+  name: digital-economy-agent-secrets
+  keys:
+    groqApiKey: GROQ_API_KEY
+    geminiApiKey: GEMINI_API_KEY
+    postgresDsn: AGENT_POSTGRES_DSN
+
+observability:
+  otlpEndpoint: ""            # empty disables tracing
+  serviceMonitor:
+    enabled: false            # requires the Prometheus Operator CRDs
+    interval: 30s
+    scrapeTimeout: 10s
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+extraEnv: []

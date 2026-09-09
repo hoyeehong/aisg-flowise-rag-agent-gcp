@@ -44,6 +44,14 @@ class Settings(BaseSettings):
 
     environment: str = "development"
     log_level: str = "INFO"
+    service_name: str = "digital-economy-agent"
+
+    # --- observability ---------------------------------------------------------
+    # Empty disables tracing. Deliberately not best-effort: an exporter pointing at a
+    # collector that is not there retries in the background and adds latency to every
+    # request, turning a missing telemetry sidecar into a user-visible problem.
+    otlp_endpoint: str = ""
+    trace_to_console: bool = False
 
     # --- model gateway ---------------------------------------------------------
     # Accepts the unprefixed GROQ_API_KEY as well as AGENT_GROQ_API_KEY. Third-party

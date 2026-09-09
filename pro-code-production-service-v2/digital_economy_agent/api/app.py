@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -11,7 +12,7 @@ from typing import Annotated, Any, cast
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -20,6 +21,8 @@ from .. import __version__
 from ..agents import build_graph
 from ..config import Settings, get_settings
 from ..gateway import AllModelsFailed, GatewayError, ModelGateway, OpenAICompatibleProvider
+from ..observability import configure_tracing, instrument_app
+from ..observability import metrics as obs_metrics
 from ..retrieval import (
     Embedder,
     GoogleEmbedder,
@@ -172,6 +175,17 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logging.basicConfig(level=resolved.log_level.upper())
         app.state.settings = resolved
+        app.state.reported_retirements = set()
+        obs_metrics.BUILD_INFO.labels(version=__version__).set(1)
+        app.state.tracing_enabled = configure_tracing(
+            service_name=resolved.service_name,
+            service_version=__version__,
+            otlp_endpoint=resolved.otlp_endpoint,
+            console=resolved.trace_to_console,
+            environment=resolved.environment,
+        )
+        if app.state.tracing_enabled:
+            instrument_app(app)
         app.state.gateway = gateway or build_gateway(resolved)
         app.state.retriever = retriever or build_retriever(resolved, gateway=app.state.gateway)
 
@@ -229,6 +243,24 @@ def create_app(
         lifespan=lifespan,
     )
 
+    @app.middleware("http")
+    async def record_request_metrics(request: Request, call_next: Any) -> Response:
+        """
+        Count and time every request, labelled by *route template*.
+
+        The template, not the raw path: labelling by path would create one time series
+        per thread id, which is how a metrics backend gets taken down.
+        """
+        start = time.perf_counter()
+        response: Response = await call_next(request)
+        route = request.scope.get("route")
+        template = getattr(route, "path", None) or "unmatched"
+        obs_metrics.REQUESTS.labels(
+            route=template, status_class=obs_metrics.status_class(response.status_code)
+        ).inc()
+        obs_metrics.REQUEST_DURATION.labels(route=template).observe(time.perf_counter() - start)
+        return response
+
     @app.get("/healthz", response_model=HealthResponse, tags=["ops"])
     async def healthz() -> HealthResponse:
         """Liveness: the process is up. Deliberately checks no dependency."""
@@ -276,25 +308,23 @@ def create_app(
             detail="" if ok else "missing: " + ", ".join(k for k, v in checks.items() if not v),
         )
 
-    @app.get("/metrics", tags=["ops"])
-    async def metrics(request: Request) -> dict[str, Any]:
+    @app.get("/metrics", tags=["ops"], response_class=PlainTextResponse)
+    async def metrics_endpoint(request: Request) -> Response:
         """
-        Gateway counters, including a cost meter per model.
+        Prometheus exposition format.
 
-        JSON for now; Phase 4 exposes these in Prometheus exposition format alongside
-        OpenTelemetry traces.
+        Phase 1 served a JSON blob here: readable, but unscrapable, so nothing could
+        alert on cost or latency. Gateway counters are reconciled onto the Prometheus
+        registry immediately before rendering, because the gateway records its own
+        totals independently of the request path.
         """
-        stats = request.app.state.gateway.stats
-        return {
-            "requests_total": stats.requests,
-            "fallbacks_total": stats.fallbacks,
-            "cost_usd_total": round(stats.total_cost_usd, 8),
-            "calls_by_model": stats.calls_by_model,
-            "tokens_by_model": stats.tokens_by_model,
-            "cost_usd_by_model": {k: round(v, 8) for k, v in stats.cost_by_model.items()},
-            "retired_models": sorted(stats.retired),
-            "active_model": request.app.state.gateway.active_model,
-        }
+        gateway: ModelGateway = request.app.state.gateway
+        for model, reason in gateway.stats.retired.items():
+            key = (model, reason)
+            if key not in request.app.state.reported_retirements:
+                request.app.state.reported_retirements.add(key)
+                obs_metrics.GATEWAY_RETIREMENTS.labels(model=model).inc()
+        return Response(content=obs_metrics.render(), media_type=obs_metrics.CONTENT_TYPE)
 
     @app.post("/v1/retrieve", response_model=RetrieveResponse, tags=["retrieval"])
     async def retrieve(body: RetrieveRequest, request: Request) -> RetrieveResponse:

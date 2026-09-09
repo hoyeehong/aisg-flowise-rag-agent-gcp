@@ -117,7 +117,7 @@ This repository is organised into two deliberately separate tiers:
 | Tier | Folder | Status | Purpose |
 | :--- | :--- | :--- | :--- |
 | **v1 — Low-code rapid prototype** | [`low-code-rapid-prototype-v1/`](low-code-rapid-prototype-v1/) | Shipped, live | Flowise Agentflow v2 graph that validated the multi-agent + HITL approach in days. Frozen for feature work; retained as the demo surface and behavioural baseline. |
-| **v2 — Pro-code production service** | [`pro-code-production-service-v2/`](pro-code-production-service-v2/) | Phases 1–3 shipped | FastAPI service over a LangGraph agent: pgvector hybrid retrieval (vector + lexical, RRF-fused), idempotent ingestion with PII redaction, a durable Postgres-backed review gate, a model gateway with fallback and cost metering, versioned prompts, an evaluation harness gating retrieval quality on every PR, 148 tests and `mypy --strict`. Phases 4–5 in design. |
+| **v2 — Pro-code production service** | [`pro-code-production-service-v2/`](pro-code-production-service-v2/) | Phases 1–4 shipped | FastAPI service over a LangGraph agent: pgvector hybrid retrieval (vector + lexical, RRF-fused), idempotent ingestion with PII redaction, a durable Postgres-backed review gate, a model gateway with fallback and cost metering, versioned prompts, an evaluation harness gating retrieval quality on every PR, Prometheus metrics and OTel tracing, a schema-validated Helm chart, validated Terraform, SBOM and keyless image signing, 165 tests and `mypy --strict`. Phase 5 in design. |
 
 The v1 folder documents its own [known limitations](low-code-rapid-prototype-v1/README.md#known-limitations-of-this-tier);
 each is carried forward as a v2 requirement rather than patched in place.
@@ -146,7 +146,9 @@ each is carried forward as a v2 requirement rather than patched in place.
 ├── pro-code-production-service-v2/     # v2 — pro-code service (Phases 1–2 shipped)
 │   ├── digital_economy_agent/          # FastAPI + LangGraph, gateway, retrieval, ingestion
 │   ├── evals/                          # Golden sets, live-API harness, regression gate
-│   ├── tests/                          # 148 tests: unit offline, integration on real Postgres
+│   ├── charts/                         # Helm chart: HPA, PDB, probes, ServiceMonitor
+│   ├── infra/terraform/                # Cloud Run, Cloud SQL + pgvector, Secret Manager, IAM
+│   ├── tests/                          # 165 tests: unit offline, integration on real Postgres
 │   ├── docker-compose.yml              # Local pgvector dependency
 │   ├── Dockerfile                      # Multi-stage, non-root, healthcheck
 │   ├── pyproject.toml                  # Service dependencies (separate from the v1 tooling)

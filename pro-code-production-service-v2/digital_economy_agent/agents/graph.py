@@ -23,6 +23,8 @@ from langgraph.types import interrupt
 
 from .. import prompts
 from ..gateway import ChatMessage, ModelGateway
+from ..observability import metrics as obs_metrics
+from ..observability import span
 from ..tools import RetrievalRequest, Retriever
 from .state import AgentState, LLMCall, ReviewDecision
 
@@ -34,8 +36,21 @@ AgentGraph = CompiledStateGraph[Any, Any, Any, Any]
 
 
 def _record(node: str, prompt_id: str, completion: object) -> LLMCall:
-    """Flatten a gateway Completion into a state-recordable accounting entry."""
+    """
+    Flatten a gateway Completion into a state-recordable accounting entry, and meter it.
+
+    Metering here rather than in the gateway keeps the ``node`` label available: the
+    operational question is which *step* is spending, not merely which model.
+    """
     c = completion  # typed loosely to keep this helper free of a circular import
+    obs_metrics.record_llm_call(
+        model=c.model,  # type: ignore[attr-defined]
+        node=node,
+        prompt_tokens=c.usage.prompt_tokens,  # type: ignore[attr-defined]
+        completion_tokens=c.usage.completion_tokens,  # type: ignore[attr-defined]
+        cost_usd=c.cost_usd,  # type: ignore[attr-defined]
+        fell_back=c.fell_back,  # type: ignore[attr-defined]
+    )
     return LLMCall(
         node=node,
         model=c.model,  # type: ignore[attr-defined]
@@ -59,9 +74,14 @@ def build_graph(
     async def research(state: AgentState) -> AgentState:
         """Retrieve context, then synthesise grounded findings from it."""
         question = state["question"]
-        result = await retriever.retrieve(
-            RetrievalRequest(query=question, top_k=state.get("top_k", 5))
-        )
+        top_k = state.get("top_k", 5)
+        with span("retrieval", top_k=top_k) as retrieval_span:
+            result = await retriever.retrieve(RetrievalRequest(query=question, top_k=top_k))
+            retrieval_span.set_attribute("chunks", len(result.chunks))
+            retrieval_span.set_attribute("chars", result.total_chars)
+        obs_metrics.RETRIEVAL_CHUNKS.observe(len(result.chunks))
+        if not result.chunks:
+            obs_metrics.RETRIEVAL_EMPTY.inc()
 
         # An empty retrieval is reported, not papered over. Writing a report from no
         # context is precisely the failure v1's groundedness metric could not detect.
@@ -100,17 +120,18 @@ def build_graph(
         """Turn findings into the four-section executive report."""
         prompt_id = prompts.pinned_versions()["write_draft"]
         template = prompts.load("write_draft")
-        completion = await gateway.complete(
-            [
-                ChatMessage(
-                    role="user",
-                    content=template.format(
-                        findings=state.get("findings", ""), question=state["question"]
-                    ),
-                )
-            ],
-            temperature=0.3,
-        )
+        with span("write_draft", prompt_version=prompt_id):
+            completion = await gateway.complete(
+                [
+                    ChatMessage(
+                        role="user",
+                        content=template.format(
+                            findings=state.get("findings", ""), question=state["question"]
+                        ),
+                    )
+                ],
+                temperature=0.3,
+            )
         return AgentState(
             draft=completion.text,
             llm_calls=[_record("write_draft", prompt_id, completion)],
@@ -124,6 +145,7 @@ def build_graph(
         resumes only when a caller supplies a ``Command(resume=...)`` for this thread,
         so nothing is generated past this point without a human verdict.
         """
+        obs_metrics.REVIEW_PAUSES.inc()
         raw = interrupt(
             {
                 "draft": state.get("draft", ""),
@@ -134,6 +156,7 @@ def build_graph(
         )
         decision = raw if isinstance(raw, ReviewDecision) else ReviewDecision.model_validate(raw)
 
+        obs_metrics.REVIEW_DECISIONS.labels(action=decision.action).inc()
         if decision.action == "approve":
             return AgentState(decision="approve", final_report=state.get("draft", ""))
         return AgentState(decision="revise", feedback_history=[decision.feedback])
@@ -180,6 +203,7 @@ def build_graph(
         used = state.get("revisions", 0)
         allowed = state.get("max_revisions", DEFAULT_MAX_REVISIONS)
         if used >= allowed and state.get("decision") != "approve":
+            obs_metrics.REVISION_BUDGET_EXHAUSTED.inc()
             return AgentState(
                 final_report=state.get("draft", ""),
                 halted_reason=(
