@@ -1,17 +1,12 @@
 name: v2 service CI
 
 # Scoped to the v2 service: the v1 prototype is frozen, so changes there should not
-# trigger (or be gated by) this pipeline.
+# be gated by this pipeline. That scoping is enforced by the `changes` job below
+# rather than by a `paths:` filter here, deliberately -- see the comment on that job.
 on:
   push:
     branches: [main]
-    paths:
-      - "pro-code-production-service-v2/**"
-      - ".github/workflows/v2-service-ci.yml"
   pull_request:
-    paths:
-      - "pro-code-production-service-v2/**"
-      - ".github/workflows/v2-service-ci.yml"
 
 permissions:
   contents: read
@@ -29,10 +24,84 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Path scoping lives here, not in `on:`, so that this workflow ALWAYS triggers and
+  # therefore always reports a status for every check name. A required status check
+  # that waits on a workflow which never ran blocks the pull request indefinitely --
+  # pending, not failing, so it cannot even be overridden. A job that is *skipped*
+  # still reports, and GitHub counts a skipped check as passing. Every other job
+  # either depends on this one or on a job that does, and a skipped dependency skips
+  # its dependents, so a change that leaves the v2 service untouched costs one job.
+  changes:
+    name: detect v2 changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    # The workflow-level default points at the service directory; this job reasons
+    # about the whole repository.
+    defaults:
+      run:
+        working-directory: .
+
+    outputs:
+      v2: ${{ steps.filter.outputs.v2 }}
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          # The comparison needs history on both sides, which the default shallow
+          # fetch does not provide.
+          fetch-depth: 0
+
+      - name: Compare the changed paths against the v2 service
+        id: filter
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "${BASE_REF:-}" ]; then
+            # Pull request: HEAD is the ephemeral merge commit, so a three-dot diff
+            # against the base yields exactly this branch's net changes.
+            base="origin/${BASE_REF}"
+          elif [ -n "${BEFORE:-}" ] \
+               && [ "${BEFORE}" != "0000000000000000000000000000000000000000" ] \
+               && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            base="${BEFORE}"
+          else
+            # First push to a branch, a force push, or a base that is no longer
+            # reachable. What changed is unknowable, so run everything rather than
+            # skip on a guess.
+            echo "no usable base revision -- running the full pipeline"
+            echo "v2=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "comparing ${base}...HEAD"
+          git diff --name-only "${base}...HEAD" | sed 's/^/  /'
+
+          # grep -c rather than -q: -q exits on the first match, which closes the pipe
+          # under the feet of git diff and turns pipefail into a spurious "no match".
+          matched="$(
+            git diff --name-only "${base}...HEAD" \
+              | grep -cE '^(pro-code-production-service-v2/|\.github/workflows/v2-service-ci\.yml$)' \
+              || true
+          )"
+
+          if [ "${matched}" -gt 0 ]; then
+            echo "v2 paths touched (${matched}) -- running the full pipeline"
+            echo "v2=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "v2 untouched -- downstream jobs will skip"
+            echo "v2=false" >> "$GITHUB_OUTPUT"
+          fi
+
   quality:
     name: lint, types, tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    needs: changes
+    if: needs.changes.outputs.v2 == 'true'
 
     services:
       # Real Postgres with pgvector. The retrieval integration tests exercise the
@@ -131,6 +200,8 @@ jobs:
     name: prefect stays optional
     runs-on: ubuntu-latest
     timeout-minutes: 8
+    needs: changes
+    if: needs.changes.outputs.v2 == 'true'
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -408,6 +479,8 @@ jobs:
     name: helm + terraform validation
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    needs: changes
+    if: needs.changes.outputs.v2 == 'true'
     steps:
       - uses: actions/checkout@v7.0.1
 
