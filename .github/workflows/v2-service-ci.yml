@@ -386,10 +386,39 @@ jobs:
       - name: Validate rendered manifests against the Kubernetes schema
         # helm lint checks templating, not whether the result is a valid object. This
         # catches a mistyped field that renders cleanly and is rejected by the API server.
+        #
+        # The core-type renders are validated with no leniency. The ServiceMonitor
+        # render is validated separately with -ignore-missing-schemas, because a CRD has
+        # no schema in the upstream catalogue -- applying that flag to every render
+        # would silently skip any kind kubeconform failed to resolve, which is exactly
+        # the mistake this step exists to catch.
         run: |
+          set -e
           docker run --rm -v /tmp:/tmp ghcr.io/yannh/kubeconform:v0.6.7 \
             -summary -strict -kubernetes-version 1.30.0 \
-            /tmp/default.yaml /tmp/fixed.yaml /tmp/full.yaml /tmp/digest.yaml
+            /tmp/default.yaml /tmp/fixed.yaml /tmp/digest.yaml
+
+          docker run --rm -v /tmp:/tmp ghcr.io/yannh/kubeconform:v0.6.7 \
+            -summary -strict -kubernetes-version 1.30.0 -ignore-missing-schemas \
+            /tmp/full.yaml
+
+          # The skip above must apply to the CRD and nothing else.
+          # -verbose is required: without it the JSON report omits valid and skipped
+          # resources entirely, so the list below would always come back empty and the
+          # assertion would pass without checking anything.
+          skipped=$(docker run --rm -v /tmp:/tmp ghcr.io/yannh/kubeconform:v0.6.7 \
+            -output json -verbose -strict -kubernetes-version 1.30.0 \
+            -ignore-missing-schemas /tmp/full.yaml | python3 -c "
+          import json, sys
+          report = json.load(sys.stdin)
+          skipped = [r['kind'] for r in report['resources'] if r['status'] == 'statusSkipped']
+          print(','.join(sorted(skipped)))
+          ")
+          echo "skipped kinds: ${skipped:-none}"
+          [ "$skipped" = "ServiceMonitor" ] || {
+            echo "::error::expected only ServiceMonitor to be skipped, got '${skipped}'"
+            exit 1
+          }
 
       - uses: hashicorp/setup-terraform@v3
         with:
@@ -520,7 +549,9 @@ jobs:
         uses: actions/upload-artifact@v7.0.1
         with:
           name: sbom-spdx
-          path: sbom.spdx.json
+          # Qualified from the repository root: upload-artifact resolves `path` against
+          # github.workspace, not against defaults.run.working-directory.
+          path: pro-code-production-service-v2/sbom.spdx.json
           if-no-files-found: error
 
       - name: Scan image for vulnerabilities
