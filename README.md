@@ -100,31 +100,50 @@ graph TD
 
 ---
 
+## 🧭 Project Tiers
+
+This repository is organised into two deliberately separate tiers:
+
+| Tier | Folder | Status | Purpose |
+| :--- | :--- | :--- | :--- |
+| **v1 — Low-code rapid prototype** | [`low-code-rapid-prototype-v1/`](low-code-rapid-prototype-v1/) | Shipped, live | Flowise Agentflow v2 graph that validated the multi-agent + HITL approach in days. Frozen for feature work; retained as the demo surface and behavioural baseline. |
+| **v2 — Pro-code production service** | [`pro-code-production-service-v2/`](pro-code-production-service-v2/) | Design stage | Re-platform as a code-owned service: typed API over LangGraph, RAG declared in code, evals that call the running system. |
+
+The v1 folder documents its own [known limitations](low-code-rapid-prototype-v1/README.md#known-limitations-of-this-tier);
+each is carried forward as a v2 requirement rather than patched in place.
+
+---
+
 ## 📂 Repository Structure
 
 ```
-├── deploy/
-│   ├── deploy_gcp.sh              # Production-grade deployment script for Google Cloud Run
-│   ├── env.example                # Sanitized deployment configuration template
-│   ├── flowise.html               # Lightweight embeddable chat web interface
-│   └── README_DEPLOY_GCP.md       # Comprehensive GCP infrastructure deployment guide
-├── evals/
-│   ├── run_evaluations.py         # Automated RAG Triad evaluation runner (TruLens/RAGAS methodology)
-│   ├── evaluation_dataset.json    # Benchmark dataset with queries, retrieved context & golden references
-│   ├── evaluation_dataset.csv     # Tabular version of benchmark scenarios
-│   ├── evaluation_report.md       # Generated benchmark report and scorecard
-│   └── evaluations_notebook.ipynb # Interactive Jupyter analysis notebook
+├── low-code-rapid-prototype-v1/        # v1 — Flowise low-code prototype (shipped, live)
+│   ├── flowise_scenario_5_workflow.json  # Sanitized Flowise Agentflow v2 workflow export
+│   ├── prompts/
+│   │   ├── research_agent_prompt.txt   # System directives for factual extraction & country breakouts
+│   │   └── writer_agent_prompt.txt     # Policy writer persona, report schema & revision rules
+│   ├── evals/
+│   │   ├── run_evaluations.py          # RAG Triad evaluation runner (fixture-scored — see v2 roadmap)
+│   │   ├── evaluation_dataset.json     # Benchmark dataset with queries, context & golden references
+│   │   ├── evaluation_dataset.csv      # Tabular version of benchmark scenarios
+│   │   ├── evaluation_report.md        # Generated benchmark report and scorecard
+│   │   └── evaluations_notebook.ipynb  # Interactive Jupyter analysis notebook
+│   └── deploy/
+│       ├── deploy_gcp.sh               # Cloud Run deployment script for the Flowise container
+│       ├── env.example                 # Sanitized deployment configuration template
+│       ├── flowise.html                # Lightweight embeddable chat web interface
+│       └── README_DEPLOY_GCP.md        # GCP infrastructure deployment guide
+├── pro-code-production-service-v2/     # v2 — pro-code service re-platform (design stage)
+│   └── README.md                       # Target architecture, naming conventions & phased roadmap
+├── data/
+│   └── imda_report.pdf                 # Source corpus shared by v1 and v2
 ├── images/
-│   └── rag_retrieval_pipeline.png # High-resolution system architecture diagram
-├── prompts/
-│   ├── research_agent_prompt.txt  # System directives for factual extraction & country breakouts
-│   └── writer_agent_prompt.txt    # Policy writer persona, report schema & revision rules
-├── flowise_scenario_5_workflow.json # Sanitized Flowise Agentflow v2 workflow export
-├── main.py                        # Central project CLI entrypoint
-├── pyproject.toml                 # Project metadata and dependencies (PEP 518/621)
-├── uv.lock                        # Deterministic lockfile managed by uv
-├── LICENSE                        # MIT License
-└── README.md                      # Project documentation
+│   └── rag_retrieval_pipeline.png      # High-resolution system architecture diagram
+├── main.py                             # Central project CLI entrypoint
+├── pyproject.toml                      # Project metadata and dependencies (PEP 518/621)
+├── uv.lock                             # Deterministic lockfile managed by uv
+├── LICENSE                             # MIT License
+└── README.md                           # Project documentation
 ```
 
 ---
@@ -168,18 +187,18 @@ The evaluation suite implements the **RAG Triad** framework (TruLens / RAGAS sta
 
 Run the automated evaluation runner:
 ```bash
-uv run python evals/run_evaluations.py
+uv run python low-code-rapid-prototype-v1/evals/run_evaluations.py
 ```
 
 To run with **Google Gemini as an active LLM-as-a-Judge**:
 ```bash
 export GEMINI_API_KEY="your-google-gemini-api-key"
-uv run python evals/run_evaluations.py --gemini-key $GEMINI_API_KEY
+uv run python low-code-rapid-prototype-v1/evals/run_evaluations.py --gemini-key $GEMINI_API_KEY
 ```
 
 To explore interactively in Jupyter:
 ```bash
-uv run jupyter lab evals/evaluations_notebook.ipynb
+uv run jupyter lab low-code-rapid-prototype-v1/evals/evaluations_notebook.ipynb
 ```
 
 ---
@@ -206,7 +225,7 @@ In the production deployment on **Google Cloud Run**, observability is enabled n
 
 ## ☁️ Cloud Deployment (Google Cloud Run)
 
-The [`deploy/`](deploy/) directory provides a production deployment setup for Google Cloud Platform (`asia-southeast1`):
+The [`low-code-rapid-prototype-v1/deploy/`](low-code-rapid-prototype-v1/deploy/) directory provides a production deployment setup for Google Cloud Platform (`asia-southeast1`):
 
 * **Zero Plaintext Secrets:** Model API keys and admin credentials are injected at container startup via **Google Secret Manager**.
 * **Persistent Storage:** Cloud Run integrates a **Google Cloud Storage (GCS) FUSE** mount (`gs://flowise-data-<PROJECT_ID>`) to persist Flowise SQLite databases, sessions, and document stores across restarts.
@@ -215,13 +234,13 @@ The [`deploy/`](deploy/) directory provides a production deployment setup for Go
 ### Deploy in One Command:
 ```bash
 # Optional: copy configuration template
-cp deploy/env.example deploy/.env
+cp low-code-rapid-prototype-v1/deploy/env.example low-code-rapid-prototype-v1/deploy/.env
 
 # Execute deployment
-bash deploy/deploy_gcp.sh
+bash low-code-rapid-prototype-v1/deploy/deploy_gcp.sh
 ```
 
-For complete step-by-step deployment and operational management instructions, see [`deploy/README_DEPLOY_GCP.md`](deploy/README_DEPLOY_GCP.md).
+For complete step-by-step deployment and operational management instructions, see [`low-code-rapid-prototype-v1/deploy/README_DEPLOY_GCP.md`](low-code-rapid-prototype-v1/deploy/README_DEPLOY_GCP.md).
 
 ---
 
@@ -232,12 +251,12 @@ For complete step-by-step deployment and operational management instructions, se
    * **Google Generative AI API** key (from [Google AI Studio](https://aistudio.google.com/))
    * **Pinecone API** key (from [Pinecone Console](https://app.pinecone.io/))
 3. Under **Document Stores**, create `imda_sea_digital_economy_report`:
-   * **Loader:** PDF File Loader $\rightarrow$ upload `imda_report.pdf`
+   * **Loader:** PDF File Loader $\rightarrow$ upload `data/imda_report.pdf`
    * **Text Splitter:** Recursive Character Text Splitter (`Chunk: 1000`, `Overlap: 200`)
    * **Embeddings:** Google GenerativeAI Embeddings (`text-embedding-004`, 768 dimensions)
    * **Vector Store:** **Pinecone** (Index: `ladp-capstone`, Dimension: `768`, Metric: `cosine`, Namespace: `imda-sea-report`)
    * Click **Save & Upsert Chunk**
-4. Under **Agentflows**, click **Add New** $\rightarrow$ **Settings** $\rightarrow$ **Load / Import Chatflow** $\rightarrow$ Select [`flowise_scenario_5_workflow.json`](flowise_scenario_5_workflow.json).
+4. Under **Agentflows**, click **Add New** $\rightarrow$ **Settings** $\rightarrow$ **Load / Import Chatflow** $\rightarrow$ Select [`low-code-rapid-prototype-v1/flowise_scenario_5_workflow.json`](low-code-rapid-prototype-v1/flowise_scenario_5_workflow.json).
 5. Click **Save** and test in the chat canvas.
 
 ---
