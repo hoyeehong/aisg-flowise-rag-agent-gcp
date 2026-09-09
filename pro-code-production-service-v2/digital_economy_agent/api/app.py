@@ -10,7 +10,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Annotated, Any, cast
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
@@ -225,13 +225,26 @@ def create_app(
         """Liveness: the process is up. Deliberately checks no dependency."""
         return HealthResponse(version=__version__)
 
-    @app.get("/readyz", response_model=ReadyResponse, tags=["ops"])
-    async def readyz(request: Request) -> ReadyResponse:
+    @app.get(
+        "/readyz",
+        response_model=ReadyResponse,
+        tags=["ops"],
+        responses={503: {"model": ReadyResponse, "description": "Not ready to serve traffic"}},
+    )
+    async def readyz(request: Request, response: Response) -> ReadyResponse:
         """
         Readiness: whether this instance can actually serve a request.
 
-        Separate from liveness so a missing credential stops traffic being routed here
-        without triggering a restart loop.
+        Returns **503 when degraded**, not 200. A readiness probe decides routing from
+        the status code alone -- Kubernetes and Cloud Run do not parse the body -- so
+        answering 200 while reporting `"status": "degraded"` keeps traffic arriving at
+        an instance that has just said it cannot do its job. With
+        `durable_checkpointer: false`, for example, a restart would silently discard
+        work awaiting a human reviewer.
+
+        Deliberately distinct from `/healthz`, which stays 200 whenever the process is
+        up: a failing *liveness* probe triggers a restart, and restarting cannot conjure
+        a missing credential or database. Readiness drains; liveness restarts.
         """
         cfg: Settings = request.app.state.settings
         checks = {
@@ -246,6 +259,8 @@ def create_app(
         if cfg.use_postgres_checkpointer:
             checks["durable_checkpointer"] = request.app.state.checkpoint_backend == "postgres"
         ok = all(checks.values())
+        if not ok:
+            response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
         return ReadyResponse(
             status="ready" if ok else "degraded",
             checks=checks,
@@ -291,7 +306,7 @@ def create_app(
     @app.get("/v1/reports/{thread_id}", response_model=ReportState, tags=["reports"])
     async def get_report(thread_id: str, service: ServiceDep) -> ReportState:
         try:
-            return service.get(thread_id)
+            return await service.get(thread_id)
         except RunNotFoundError as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"no run {thread_id}") from exc
 
@@ -391,7 +406,7 @@ def create_app(
                 ):
                     for node in update:
                         yield sse("node", {"node": node})
-                yield sse("state", service.get(thread_id).model_dump())
+                yield sse("state", (await service.get(thread_id)).model_dump())
             except Exception as exc:  # surface failures in-band; the response is already 200
                 logger.exception("streaming run %s failed", thread_id)
                 yield sse("error", {"error": type(exc).__name__, "detail": str(exc)})

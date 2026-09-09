@@ -165,6 +165,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: [quality, optional-deps]
+
+    services:
+      # The smoke test runs the image twice -- once without a database and once with --
+      # to assert that readiness actually reflects reality in both directions.
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: devpass
+          POSTGRES_DB: agent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d agent"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -180,23 +197,59 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Smoke test the image
-        # Proves the container actually serves traffic, not merely that it builds.
+      - name: Smoke test the image — degraded without a database
+        # Asserts the probe contract, not merely that the container answers. Readiness
+        # must report 503 with no database, because a readiness probe routes on the
+        # status code alone. Liveness must stay 200: restarting cannot conjure a
+        # database, so a failing liveness probe would only cause a restart loop.
         run: |
-          docker run -d --name agent -p 8080:8080 \
+          docker run -d --name agent-degraded -p 8080:8080 \
             -e AGENT_GROQ_API_KEY=ci-dummy \
             digital-economy-agent:${{ github.sha }}
           for i in $(seq 1 30); do
-            if curl -fsS http://localhost:8080/healthz >/dev/null 2>&1; then
-              echo "healthz OK after ${i}s"; break
-            fi
+            curl -fsS http://localhost:8080/healthz >/dev/null 2>&1 && break
             if [ "$i" = "30" ]; then
-              echo "::error::service did not become healthy"; docker logs agent; exit 1
+              echo "::error::container never became live"; docker logs agent-degraded; exit 1
             fi
             sleep 1
           done
-          curl -fsS http://localhost:8080/readyz
-          docker rm -f agent
+
+          live=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/healthz)
+          ready=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/readyz)
+          body=$(curl -s http://localhost:8080/readyz)
+          echo "healthz=$live readyz=$ready"
+          echo "$body"
+
+          [ "$live" = "200" ] || { echo "::error::liveness should be 200, got $live"; exit 1; }
+          [ "$ready" = "503" ] || { echo "::error::readiness should be 503 with no database, got $ready"; exit 1; }
+          echo "$body" | grep -q '"durable_checkpointer":false' \
+            || { echo "::error::readyz did not name the failing check"; exit 1; }
+          docker rm -f agent-degraded
+
+      - name: Smoke test the image — ready with a database
+        # The complement: given a real database the same image must reach 200/ready,
+        # which also proves it can connect to Postgres and create its checkpoint tables
+        # from inside the container rather than only from the test runner.
+        run: |
+          docker run -d --name agent-ready --network host \
+            -e AGENT_GROQ_API_KEY=ci-dummy \
+            -e AGENT_POSTGRES_DSN=postgresql://postgres:devpass@localhost:5432/agent \
+            digital-economy-agent:${{ github.sha }}
+          for i in $(seq 1 45); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/readyz || echo 000)
+            [ "$code" = "200" ] && { echo "ready after ${i}s"; break; }
+            if [ "$i" = "45" ]; then
+              echo "::error::never became ready (last status $code)"
+              curl -s http://localhost:8080/readyz || true
+              docker logs agent-ready
+              exit 1
+            fi
+            sleep 1
+          done
+          curl -s http://localhost:8080/readyz
+          curl -s http://localhost:8080/readyz | grep -q '"status":"ready"' \
+            || { echo "::error::readyz reported 200 without status ready"; exit 1; }
+          docker rm -f agent-ready
 
       - name: Scan image for vulnerabilities
         # Uses the official Trivy image rather than the marketplace action, pinned to an
