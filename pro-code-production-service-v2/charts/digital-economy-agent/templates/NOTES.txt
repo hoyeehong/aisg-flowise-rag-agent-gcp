@@ -1,0 +1,15 @@
+{{ include "agent.fullname" . }} deployed as image {{ include "agent.image" . }}.
+
+Check readiness (503 means degraded -- the body names the failing check):
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "agent.fullname" . }} 8080:{{ .Values.service.port }}
+  curl -i localhost:8080/readyz
+
+{{- if not .Values.image.digest }}
+
+WARNING: deploying by mutable tag "{{ default .Chart.AppVersion .Values.image.tag }}".
+Set image.digest for a reproducible rollout.
+{{- end }}
+{{- if not .Values.observability.otlpEndpoint }}
+
+NOTE: tracing is disabled (observability.otlpEndpoint is empty).
+{{- end }}

@@ -1,0 +1,17 @@
+{{- if .Values.observability.serviceMonitor.enabled }}
+# Requires the Prometheus Operator CRDs. Off by default so `helm install` works on a
+# cluster without them rather than failing on an unknown kind.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "agent.fullname" . }}
+  labels: {{- include "agent.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels: {{- include "agent.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.observability.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.observability.serviceMonitor.scrapeTimeout }}
+{{- end }}

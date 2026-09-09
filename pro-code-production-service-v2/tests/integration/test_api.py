@@ -283,15 +283,90 @@ async def test_invalid_create_payloads_are_422(client, payload):
     assert (await client.post("/v1/reports", json=payload)).status_code == 422
 
 
-async def test_metrics_expose_per_model_cost(client):
+async def test_metrics_are_prometheus_exposition_not_json(client):
+    """
+    Phase 1 served JSON here. Readable, but unscrapable: no Prometheus, Cloud
+    Monitoring or Grafana could consume it, so nothing could alert on cost or latency.
+    """
     await client.post("/v1/reports", json={"question": "Digital trust in SEA"})
-    body = (await client.get("/metrics")).json()
+    response = await client.get("/metrics")
 
-    assert body["requests_total"] == 2
-    assert body["cost_usd_total"] > 0
-    assert body["calls_by_model"] == {"groq/primary": 2}
-    assert body["tokens_by_model"]["groq/primary"] == 300
-    assert body["active_model"] == "groq/primary"
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+    body = response.text
+    # Exposition format carries HELP and TYPE lines; JSON does not.
+    assert "# HELP agent_llm_cost_usd_total" in body
+    assert "# TYPE agent_llm_calls_total counter" in body
+
+
+def _sample(body: str, metric: str, default: float | None = None, **labels: str) -> float:
+    """
+    Read one sample out of Prometheus exposition text.
+
+    ``default`` covers a series that does not exist yet, which is what a counter looks
+    like before its first increment.
+    """
+    # prometheus_client emits labels in alphabetical order, not call order.
+    label_part = ",".join(f'{k}="{v}"' for k, v in sorted(labels.items()))
+    needle = f"{metric}{{{label_part}}}" if label_part else metric
+    for line in body.splitlines():
+        if line.startswith("#"):
+            continue
+        name, _, value = line.rpartition(" ")
+        if name.strip() == needle:
+            return float(value)
+    if default is not None:
+        return default
+    raise AssertionError(f"{needle} not found in:\n{body[:2000]}")
+
+
+async def test_metrics_meter_cost_and_tokens_per_model_and_node(client):
+    """
+    The operational question is which *step* is spending, not just which model.
+
+    Asserted as deltas across one request. Prometheus counters are process-global and
+    cumulative by design -- they have no public reset -- so an absolute assertion would
+    pass alone and fail in a suite. Reading an increase over a window is also how an
+    operator actually consumes a counter.
+    """
+    before = (await client.get("/metrics")).text
+    await client.post("/v1/reports", json={"question": "Digital trust in SEA"})
+    after = (await client.get("/metrics")).text
+
+    def delta(metric: str, **labels: str) -> float:
+        return _sample(after, metric, default=0.0, **labels) - _sample(
+            before, metric, default=0.0, **labels
+        )
+
+    assert delta("agent_llm_calls_total", model="groq/primary", node="research") == 1.0
+    assert delta("agent_llm_calls_total", model="groq/primary", node="write_draft") == 1.0
+    assert delta("agent_llm_tokens_total", model="groq/primary", direction="prompt") == 200.0
+    assert delta("agent_llm_tokens_total", model="groq/primary", direction="completion") == 100.0
+    assert delta("agent_llm_cost_usd_total", model="groq/primary") > 0
+    assert delta("agent_review_pauses_total") == 1.0
+    assert delta("agent_retrieval_empty_total") == 0.0, "the dev corpus should match"
+
+
+async def test_metrics_label_requests_by_route_template_not_path(client):
+    """
+    Labelling by raw path would create one time series per thread id, which is how a
+    metrics backend gets taken down.
+    """
+    created = (await client.post("/v1/reports", json={"question": "Digital trust"})).json()
+    await client.get(f"/v1/reports/{created['thread_id']}")
+    body = (await client.get("/metrics")).text
+
+    assert (
+        _sample(
+            body,
+            "agent_requests_total",
+            default=0.0,
+            route="/v1/reports/{thread_id}",
+            status_class="2xx",
+        )
+        >= 1.0
+    ), "the route template must appear as a label"
+    assert created["thread_id"] not in body, "a thread id must never become a label"
 
 
 async def test_stream_emits_node_progress_then_final_state(client):
@@ -407,8 +482,9 @@ async def test_partial_failure_still_succeeds_via_fallback(settings, retriever, 
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
             r = await c.post("/v1/reports", json={"question": "Digital trust in SEA"})
-            metrics = (await c.get("/metrics")).json()
+            metrics = (await c.get("/metrics")).text
 
     assert r.status_code == 202
     assert r.json()["cost"]["models_used"] == ["groq/secondary"]
-    assert metrics["retired_models"] == ["groq/primary"]
+    assert _sample(metrics, "agent_gateway_model_retirements_total", model="groq/primary") >= 1.0
+    assert _sample(metrics, "agent_gateway_fallbacks_total", model="groq/secondary") >= 1.0

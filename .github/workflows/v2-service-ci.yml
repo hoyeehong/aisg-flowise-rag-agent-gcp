@@ -264,6 +264,146 @@ jobs:
         if: failure()
         run: cat /tmp/service.log
 
+  publish:
+    name: publish and sign
+    # Only on a push to main: cosign signs a digest in a registry, so there is nothing
+    # to sign on the pull_request path where the image never leaves the runner.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [quality, optional-deps, evals, infra, image]
+
+    permissions:
+      contents: read
+      packages: write
+      # Required for keyless signing: cosign exchanges this OIDC token for a
+      # certificate, so no long-lived signing key has to be stored anywhere.
+      id-token: write
+
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}/digital-economy-agent
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: docker/setup-buildx-action@v4.3.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: pro-code-production-service-v2
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - uses: sigstore/cosign-installer@v3.7.0
+
+      - name: Sign the image by digest
+        # By digest, never by tag: a tag can be repointed after signing, which would
+        # make the signature attest to something other than what is deployed.
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+
+      - name: Generate and attach the SBOM as an attestation
+        # Attached to the digest rather than uploaded as a build artifact, so the
+        # provenance travels with the image to whoever pulls it.
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD:/out" \
+            anchore/syft:v1.18.1 "${IMAGE}@${DIGEST}" \
+              -o spdx-json=/out/sbom.spdx.json -q
+          cosign attest --yes --predicate sbom.spdx.json \
+            --type spdxjson "${IMAGE}@${DIGEST}"
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+
+      - name: Verify the signature and attestation
+        # Signing without verifying proves only that the command exited 0. This
+        # confirms the signature is discoverable and bound to this workflow identity.
+        run: |
+          cosign verify "${IMAGE}@${DIGEST}" \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          cosign verify-attestation "${IMAGE}@${DIGEST}" --type spdxjson \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          echo "signed and attested: ${IMAGE}@${DIGEST}"
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+
+  infra:
+    name: helm + terraform validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Helm lint
+        run: |
+          docker run --rm -v "$PWD/charts:/charts" alpine/helm:3.16.3 \
+            lint /charts/digital-economy-agent
+
+      - name: Render every values permutation the chart supports
+        # Templating with defaults alone leaves the conditional paths untested, which is
+        # where chart bugs live: an HPA that renders alongside a fixed replica count, or
+        # a ServiceMonitor referencing a CRD the cluster does not have.
+        run: |
+          set -e
+          render() {
+            docker run --rm -v "$PWD/charts:/charts" alpine/helm:3.16.3 \
+              template rel /charts/digital-economy-agent "$@"
+          }
+          render > /tmp/default.yaml
+          render --set autoscaling.enabled=false --set replicaCount=4 > /tmp/fixed.yaml
+          render --set observability.serviceMonitor.enabled=true \
+                 --set observability.otlpEndpoint=otel-collector:4317 > /tmp/full.yaml
+          render --set image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+                 > /tmp/digest.yaml
+          grep -q 'digital-economy-agent@sha256:' /tmp/digest.yaml \
+            || { echo "::error::image.digest did not take precedence over the tag"; exit 1; }
+          grep -q 'kind: HorizontalPodAutoscaler' /tmp/default.yaml \
+            || { echo "::error::HPA missing when autoscaling is enabled"; exit 1; }
+          ! grep -q 'kind: HorizontalPodAutoscaler' /tmp/fixed.yaml \
+            || { echo "::error::HPA rendered alongside a fixed replica count"; exit 1; }
+          grep -q 'replicas: 4' /tmp/fixed.yaml \
+            || { echo "::error::replicaCount ignored when autoscaling is off"; exit 1; }
+          grep -q 'kind: ServiceMonitor' /tmp/full.yaml \
+            || { echo "::error::ServiceMonitor missing when enabled"; exit 1; }
+
+      - name: Validate rendered manifests against the Kubernetes schema
+        # helm lint checks templating, not whether the result is a valid object. This
+        # catches a mistyped field that renders cleanly and is rejected by the API server.
+        run: |
+          docker run --rm -v /tmp:/tmp ghcr.io/yannh/kubeconform:v0.6.7 \
+            -summary -strict -kubernetes-version 1.30.0 \
+            /tmp/default.yaml /tmp/fixed.yaml /tmp/full.yaml /tmp/digest.yaml
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+
+      - name: Terraform fmt
+        run: terraform -chdir=infra/terraform fmt -check -recursive -diff
+
+      - name: Terraform validate
+        # -backend=false: validation needs no remote state and therefore no credentials.
+        run: |
+          terraform -chdir=infra/terraform init -backend=false -input=false
+          terraform -chdir=infra/terraform validate
+
   image:
     name: container build
     runs-on: ubuntu-latest
@@ -354,6 +494,34 @@ jobs:
           curl -s http://localhost:8080/readyz | grep -q '"status":"ready"' \
             || { echo "::error::readyz reported 200 without status ready"; exit 1; }
           docker rm -f agent-ready
+
+      - name: Generate an SBOM
+        # An SBOM is what makes "are we affected by this CVE" answerable without
+        # rebuilding: it is a record of exactly what shipped in this image.
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD:/out" \
+            anchore/syft:v1.18.1 digital-economy-agent:${{ github.sha }} \
+              -o spdx-json=/out/sbom.spdx.json -q
+          python3 -c "
+          import json, sys
+          sbom = json.load(open('sbom.spdx.json'))
+          packages = {p['name'] for p in sbom.get('packages', [])}
+          print(f'SBOM records {len(packages)} packages')
+          if len(packages) < 50:
+              sys.exit('::error::SBOM looks empty; syft may not have read the image')
+          leaked = packages & {'pip', 'setuptools', 'wheel'}
+          if leaked:
+              sys.exit(f'::error::build tooling present in the runtime image: {leaked}')
+          "
+
+      - name: Upload the SBOM
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: sbom-spdx
+          path: sbom.spdx.json
+          if-no-files-found: error
 
       - name: Scan image for vulnerabilities
         # Uses the official Trivy image rather than the marketplace action, pinned to an

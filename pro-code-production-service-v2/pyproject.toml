@@ -16,6 +16,12 @@ dependencies = [
     "pgvector>=0.3",
     "pypdf>=5.0",
     "langgraph-checkpoint-postgres>=2.0",
+    "prometheus-client>=0.21",
+    "opentelemetry-api>=1.27",
+    "opentelemetry-sdk>=1.27",
+    "opentelemetry-instrumentation-fastapi>=0.48b0",
+    "opentelemetry-instrumentation-httpx>=0.48b0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.27",
 ]
 
 [project.optional-dependencies]

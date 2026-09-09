@@ -1,10 +1,11 @@
 # v2 — Pro-Code Production Service
 
-**Status:** Phases 1–3 delivered — the service runs on pgvector hybrid retrieval with a
-durable review gate, is `mypy --strict` clean, is covered by 148 tests, and has a
-retrieval eval gating every pull request. Phases 4–5 remain design-stage; the naming
-conventions below were fixed first so the code landed in the right shape rather than
-being reorganised later.
+**Status:** Phases 1–4 delivered — the service runs on pgvector hybrid retrieval with a
+durable review gate, exports Prometheus metrics and OpenTelemetry traces, ships a
+schema-validated Helm chart and validated Terraform, is `mypy --strict` clean, and is
+covered by 165 tests with a retrieval eval gating every pull request. Phase 5 remains
+design-stage; the naming conventions below were fixed first so the code landed in the
+right shape rather than being reorganised later.
 
 v2 re-platforms the [v1 Flowise prototype](../low-code-rapid-prototype-v1/README.md) as a
 code-owned service: a typed API over a LangGraph agent, a RAG pipeline declared in code rather
@@ -55,15 +56,15 @@ pro-code-production-service-v2/
 │   ├── config.py                   ✓ environment-driven settings
 │   ├── retrieval/                  ✓ chunking, embeddings, pgvector, hybrid search, MMR
 │   ├── ingestion/                  ✓ PII redaction, idempotent pipeline, Prefect flow, CLI
-│   └── observability/              ✓ package placeholder; OTel + Prometheus land in P4
+│   └── observability/              ✓ Prometheus metrics, OpenTelemetry tracing
 ├── tests/
 │   ├── unit/                       ✓ graph transitions, gateway taxonomy, harness metrics
 │   ├── integration/                ✓ real routes + real graph, scripted providers
 │   └── load/                       — k6 / Locust scenarios (P4)
 ├── docker-compose.yml              ✓ local pgvector dependency
 ├── evals/                          ✓ golden sets, live-API harness, gate, baseline
-├── infra/terraform/                — one module per resource group (P4)
-├── charts/digital-economy-agent/   — Helm chart, matches the K8s object name (P4)
+├── infra/terraform/                ✓ Cloud Run, Cloud SQL, Secret Manager, least-privilege IAM
+├── charts/digital-economy-agent/   ✓ Helm chart: HPA, PDB, probes, ServiceMonitor
 ├── Dockerfile                      ✓ multi-stage, non-root, healthcheck
 └── pyproject.toml                  ✓
 ```
@@ -125,6 +126,103 @@ One case per line, each carrying `case_id`, `query`, `expected_sources`, `refere
 so a score is always attributable to an exact dataset revision.
 
 ---
+
+## 5. What Phase 4 delivered
+
+### `/metrics` is now scrapable
+
+Phase 1 served a JSON blob there. Readable, but no Prometheus, Cloud Monitoring or
+Grafana can consume it, so nothing could alert on cost or latency. It is now exposition
+format, verified from inside the built container.
+
+Two label decisions matter more than the metric list:
+
+* **Requests are labelled by route *template*, never raw path.** Labelling by path
+  would create one time series per `thread_id`. A test asserts the thread id never
+  appears in the output.
+* **Cost is metered per model *and* per graph node.** The operational question is not
+  "what did this cost" but "which step is spending" — so `agent_llm_cost_usd_total` and
+  `agent_llm_calls_total{node=...}` are separate dimensions.
+
+Counters rather than gauges for cumulative work: a counter survives a scrape gap and
+restarts visibly, while a gauge of "total cost" silently resets to zero on redeploy.
+The latency histogram uses buckets up to 60s, because a report makes two sequential
+model calls and the default buckets stop at 10s — which would put nearly every
+observation in `+Inf` and make p95 unreadable.
+
+### Tracing is opt-in, not best-effort
+
+Spans wrap `retrieval`, `write_draft` and `revise`, with the prompt version and chunk
+count as attributes. Verified locally via the console exporter.
+
+Disabled unless an OTLP endpoint is configured, deliberately: an exporter pointing at a
+collector that is not there retries in the background and adds latency to every request,
+turning a missing telemetry sidecar into a user-visible problem. An exception escaping a
+span sets an error status — without it an errored span renders as successful, which
+makes the trace worse than no trace.
+
+### Helm chart, schema-validated
+
+`helm lint` passes and the rendered manifests are checked with **kubeconform in strict
+mode against Kubernetes 1.30** — `helm lint` only checks templating, not whether the
+result is an object the API server would accept.
+
+CI renders four values permutations and asserts the conditional paths, because that is
+where chart bugs live: an HPA rendering alongside a fixed replica count, a
+ServiceMonitor referencing a CRD the cluster lacks, or a digest that fails to override
+a tag.
+
+| Decision | Reason |
+| :--- | :--- |
+| Digest wins over tag | A mutable tag means two pods in one ReplicaSet can run different code after a rolling restart, making an incident unreproducible |
+| Startup probe gates the others | The first start applies the pgvector schema and checkpointer migrations; a tight liveness probe would restart-loop through it |
+| Requests **and** limits both set | Without requests the scheduler cannot place the pod and the HPA has no denominator; without limits one pod starves its neighbours |
+| Secrets referenced, never templated | A credential in `values.yaml` lands in `helm get values`, in CI logs, and in shell history |
+| `automountServiceAccountToken: false` | The service never calls the Kubernetes API |
+| ConfigMap checksum annotation | Without it a ConfigMap edit leaves every running pod on the old values with no indication why |
+| Slow scale-down (300s) | A paused review survives eviction because it lives in Postgres, but an in-flight report does not, and its model time would be paid for twice |
+
+### Terraform, validated
+
+`terraform fmt -check` and `terraform validate` both pass and run in CI.
+
+| Decision | Reason |
+| :--- | :--- |
+| Dedicated runtime service account | The default compute SA is shared by every workload in the project and accumulates roles |
+| One IAM binding per secret | A project-level `secretAccessor` would let this service read every secret in the project |
+| Secret *containers* managed, values not | A credential in a Terraform variable lands in state, in plan output, and in CI logs |
+| `cloudsql.enable_pgvector` flag | pgvector ships with Cloud SQL but must be allow-listed before `CREATE EXTENSION` succeeds — otherwise the first `ensure_schema()` fails with an error that never mentions the flag |
+| No public database IP | Cloud Run reaches it through the connector using the runtime identity |
+| Deletion protection on by default | The database holds paused human-review runs |
+| `immutable_tags` on Artifact Registry | The registry-side half of digest pinning: without it a tag can be repointed after an image is reviewed and scanned |
+| Root module, not one module per group | For a single service with no second consumer, modules add a variable-passing layer with no reuse to justify it. A module boundary belongs where a second service actually needs one. |
+
+### Supply chain
+
+* **SBOM** generated with syft (SPDX 2.3, 179 packages). CI asserts it is non-empty and
+  that `pip`/`setuptools`/`wheel` are absent — an independent check on the Phase 1
+  hardening, from the artefact rather than the Dockerfile.
+* **Keyless signing** with cosign on pushes to `main`: the image is pushed to GHCR,
+  signed **by digest**, and the SBOM attached as an attestation. By digest because a tag
+  can be repointed after signing, which would make the signature attest to something
+  other than what is deployed. The job then *verifies* its own signature and
+  attestation — signing without verifying proves only that the command exited 0.
+* Trivy still gates at zero fixable HIGH/CRITICAL, re-confirmed after the new
+  observability dependencies.
+
+### Phase 4 limitations
+
+* **The signing job is unverified.** Keyless cosign needs GitHub OIDC and a registry
+  push, neither of which exists on the pull-request path, so it runs only on merge to
+  `main`. Everything else in this phase was verified locally first.
+* **Terraform is validated, never applied.** `validate` catches schema and reference
+  errors; it does not prove the resources come up, and the Cloud SQL private-network
+  path assumes Private Service Access already exists on the target network.
+* **The Helm chart is schema-valid, never deployed.** No cluster was available. The
+  rendered objects are checked against the Kubernetes 1.30 schema, which is a real
+  check but not a running pod.
+* **No dashboards or alert rules.** The metrics exist and are scrapable; turning them
+  into SLOs is the natural next step and needs a Prometheus to point at.
 
 ## 5. What Phase 3 delivered
 
@@ -446,7 +544,7 @@ Phases are unchanged from the review; the naming above is what each one lands in
 | 1 ✓ | FastAPI + LangGraph service, Dockerfile, pytest, CI | `api/`, `agents/`, `gateway/`, `tools/`, `tests/` |
 | 2 ✓ | pgvector hybrid retrieval + Prefect ingestion with PII redaction | `retrieval/`, `ingestion/` |
 | 3 ✓ | Eval harness against the live API, wired as a required PR check | `evals/` |
-| 4 | Terraform, Helm, OTel + Prometheus, Trivy/SBOM/signing | `infra/`, `charts/`, `observability/` |
+| 4 ✓ | Terraform, Helm, OTel + Prometheus, Trivy/SBOM/signing | `infra/`, `charts/`, `observability/` |
 | 5 | *(optional)* Kafka/Pub-Sub consumer, tenant isolation via Postgres RLS | `ingestion/`, `api/` |
 
 Phase 0 is deliberately scoped to v1: the published scores should be honest before any new
