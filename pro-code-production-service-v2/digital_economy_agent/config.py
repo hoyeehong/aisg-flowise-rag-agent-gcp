@@ -93,11 +93,29 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("AGENT_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"),
     )
     tenant_id: str = "default"
+
+    # --- tenancy and least privilege -------------------------------------------
+    # The service queries as a non-superuser role so the row-level-security policy on
+    # `chunks` actually applies: superusers ignore policies, and FORCE ROW LEVEL
+    # SECURITY only subjects the table owner. DDL needs ownership, so bootstrap uses a
+    # separate administrative DSN. Empty falls back to `postgres_dsn`, which keeps a
+    # single-DSN local setup working -- at the cost of RLS being inert there, which
+    # `/readyz` now reports rather than leaving it to be discovered.
+    postgres_admin_dsn: str = ""
+    # When set, bootstrap creates and grants this role. Left empty in production, where
+    # the role and its password are managed by Terraform.
+    postgres_app_role: str = ""
+    postgres_app_password: SecretStr = SecretStr("")
     # Opting in to the deterministic embedder is a configuration decision, not a
     # degradation: it is how retrieval is evaluated in CI without an API key. Left
     # false, a missing embedding credential correctly reports the service as degraded,
     # so an operator who *meant* to have embeddings still gets a signal.
     allow_hashing_embedder: bool = False
+
+    @property
+    def admin_dsn(self) -> str:
+        """DSN for DDL and role management; the app DSN when none is configured."""
+        return self.postgres_admin_dsn or self.postgres_dsn
 
     # --- hybrid search ---------------------------------------------------------
     retrieval_candidate_multiplier: int = Field(default=4, ge=1, le=20)

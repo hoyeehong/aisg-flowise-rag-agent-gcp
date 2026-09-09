@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -192,6 +194,33 @@ class PgVectorStore:
             await register_vector_async(conn)
         return conn
 
+    @asynccontextmanager
+    async def _session(self, tenant_id: str) -> AsyncIterator[psycopg.AsyncCursor[Any]]:
+        """
+        A cursor inside a transaction whose row-level-security tenant is already set.
+
+        Every tenant-scoped query goes through here, so the ``app.tenant_id`` setting
+        the RLS policy reads can never be missing: the policy fails closed, meaning a
+        forgotten SET returns zero rows rather than another tenant's.
+
+        ``SET`` does not accept placeholders, so this uses ``set_config`` with
+        ``is_local => true`` -- the function form of ``SET LOCAL``, scoped to this
+        transaction. That scope matters more than it looks: the store currently opens a
+        connection per call, but if a pool is introduced later, a session-scoped ``SET``
+        would leak the previous request's tenant onto a recycled connection. That is the
+        classic way RLS deployments are silently broken, and it is invisible to
+        single-tenant testing.
+        """
+        if not tenant_id:
+            raise ValueError("tenant_id must be a non-empty string")
+        conn = await self._connect()
+        try:
+            async with conn.transaction(), conn.cursor() as cur:
+                await cur.execute("SELECT set_config('app.tenant_id', %s, true)", (tenant_id,))
+                yield cur
+        finally:
+            await conn.close()
+
     async def ensure_schema(self) -> None:
         """Apply the DDL. Idempotent, so it is safe on every service start."""
         ddl = _SCHEMA.read_text(encoding="utf-8")
@@ -207,13 +236,118 @@ class PgVectorStore:
         finally:
             await conn.close()
 
+    async def ensure_app_role(self, role: str, *, password: str | None = None) -> None:
+        """
+        Create the least-privilege role the service connects as, and grant it exactly
+        the DML it needs. Runs as an administrative role; idempotent.
+
+        Enabling row-level security is not what enforces it. A superuser ignores
+        policies outright, and ``FORCE ROW LEVEL SECURITY`` subjects only the table
+        *owner* -- not a superuser. Connecting as ``postgres``, which local development
+        and CI both did, leaves every policy inert while the whole suite stays green:
+        measured directly on the first run of this schema, an unscoped
+        ``SELECT count(*) FROM chunks`` returned 299 rows with RLS enabled and forced.
+
+        ``NOSUPERUSER NOBYPASSRLS`` is therefore the load-bearing line here, not the
+        GRANTs. It is re-applied on every call so that a role which later acquires
+        BYPASSRLS out of band is brought back into the policy on the next start.
+        """
+        conn = await self._connect(register_vector=False)
+        ident = sql.Identifier(role)
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT 1 AS present FROM pg_roles WHERE rolname = %s", (role,))
+                if await cur.fetchone() is None:
+                    # Concurrent starts can both reach this branch; the loser gets a
+                    # duplicate_object error, which is why callers run it once at
+                    # bootstrap rather than per request.
+                    await cur.execute(sql.SQL("CREATE ROLE {} LOGIN").format(ident))
+                if password is not None:
+                    await cur.execute(
+                        sql.SQL("ALTER ROLE {} WITH PASSWORD {}").format(
+                            ident, sql.Literal(password)
+                        )
+                    )
+                await cur.execute(
+                    sql.SQL("ALTER ROLE {} NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE").format(
+                        ident
+                    )
+                )
+                await cur.execute(
+                    sql.SQL("GRANT SELECT, INSERT, UPDATE, DELETE ON chunks TO {}").format(ident)
+                )
+                # The BIGSERIAL primary key needs the sequence, or every INSERT fails
+                # with a permission error that names the sequence, not the table.
+                await cur.execute(
+                    sql.SQL("GRANT USAGE, SELECT ON SEQUENCE chunks_id_seq TO {}").format(ident)
+                )
+            await conn.commit()
+        finally:
+            await conn.close()
+
+    async def isolation_status(self) -> dict[str, Any]:
+        """
+        Report whether tenant isolation is actually being enforced on this connection.
+
+        This exists because the first version of this schema was enabled, forced, and
+        entirely ineffective: connected as a superuser, an unscoped
+        ``SELECT count(*) FROM chunks`` returned 299 rows while every test passed.
+        Enabling a policy and enforcing one are different facts, and only the second is
+        worth reporting.
+
+        The decisive field is ``enforced``, which is measured rather than inferred: it
+        runs an unscoped count and requires zero rows. A configuration that merely
+        looks correct -- policy present, RLS forced -- still reports
+        ``enforced: false`` if the connected role can read across tenants.
+        """
+        conn = await self._connect(register_vector=False)
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    SELECT current_user AS role,
+                           (SELECT rolsuper     FROM pg_roles WHERE rolname = current_user)
+                               AS is_superuser,
+                           (SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user)
+                               AS bypasses_rls,
+                           (SELECT relrowsecurity      FROM pg_class WHERE relname = 'chunks')
+                               AS rls_enabled,
+                           (SELECT relforcerowsecurity FROM pg_class WHERE relname = 'chunks')
+                               AS rls_forced,
+                           EXISTS (
+                               SELECT 1 FROM pg_policy pol
+                               JOIN pg_class c ON c.oid = pol.polrelid
+                               WHERE c.relname = 'chunks'
+                                 AND pol.polname = 'chunks_tenant_isolation'
+                           ) AS policy_present
+                    """
+                )
+                facts = dict(await cur.fetchone() or {})
+                # The measurement. No tenant is set on this connection, so a policy
+                # that is genuinely in force must yield zero rows.
+                await cur.execute("SELECT count(*) AS n FROM chunks")
+                row = await cur.fetchone()
+                leaked = int(row["n"]) if row else 0
+        finally:
+            await conn.close()
+
+        facts["unscoped_visible_rows"] = leaked
+        facts["enforced"] = bool(
+            facts.get("rls_enabled")
+            and facts.get("policy_present")
+            and not facts.get("is_superuser")
+            and not facts.get("bypasses_rls")
+            and leaked == 0
+        )
+        return facts
+
     async def upsert(
         self,
         chunks: list[Chunk],
         embeddings: list[list[float]],
         *,
         embedder: str,
-        tenant_id: str = "default",
+        tenant_id: str,
         redactions: list[dict[str, int]] | None = None,
     ) -> tuple[int, int]:
         """
@@ -233,62 +367,53 @@ class PgVectorStore:
 
         marks = redactions or [{} for _ in chunks]
         inserted = 0
-        conn = await self._connect()
-        try:
-            async with conn.cursor() as cur:
-                for chunk, embedding, redaction in zip(chunks, embeddings, marks, strict=True):
-                    await cur.execute(
-                        """
-                        INSERT INTO chunks
-                            (content_hash, tenant_id, source, page, text,
-                             embedding, embedder, redactions)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (tenant_id, content_hash) DO UPDATE SET
-                            embedding   = EXCLUDED.embedding,
-                            embedder    = EXCLUDED.embedder,
-                            redactions  = EXCLUDED.redactions,
-                            ingested_at = now()
-                        RETURNING (xmax = 0) AS was_inserted
-                        """,
-                        (
-                            content_hash(chunk.source, chunk.page, chunk.text),
-                            tenant_id,
-                            chunk.source,
-                            chunk.page,
-                            chunk.text,
-                            embedding,
-                            embedder,
-                            Jsonb(redaction),
-                        ),
-                    )
-                    row = await cur.fetchone()
-                    if row and row["was_inserted"]:
-                        inserted += 1
-            await conn.commit()
-        finally:
-            await conn.close()
+        async with self._session(tenant_id) as cur:
+            for chunk, embedding, redaction in zip(chunks, embeddings, marks, strict=True):
+                await cur.execute(
+                    """
+                    INSERT INTO chunks
+                        (content_hash, tenant_id, source, page, text,
+                         embedding, embedder, redactions)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (tenant_id, content_hash) DO UPDATE SET
+                        embedding   = EXCLUDED.embedding,
+                        embedder    = EXCLUDED.embedder,
+                        redactions  = EXCLUDED.redactions,
+                        ingested_at = now()
+                    RETURNING (xmax = 0) AS was_inserted
+                    """,
+                    (
+                        content_hash(chunk.source, chunk.page, chunk.text),
+                        tenant_id,
+                        chunk.source,
+                        chunk.page,
+                        chunk.text,
+                        embedding,
+                        embedder,
+                        Jsonb(redaction),
+                    ),
+                )
+                row = await cur.fetchone()
+                if row and row["was_inserted"]:
+                    inserted += 1
         return inserted, len(chunks) - inserted
 
     async def vector_search(
-        self, embedding: list[float], *, top_k: int, tenant_id: str = "default"
+        self, embedding: list[float], *, top_k: int, tenant_id: str
     ) -> list[ScoredChunk]:
         """Nearest neighbours by cosine distance, converted to a similarity score."""
-        conn = await self._connect()
-        try:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    """
-                    SELECT source, page, text, 1 - (embedding <=> %s::vector) AS similarity
-                    FROM chunks
-                    WHERE tenant_id = %s
-                    ORDER BY embedding <=> %s::vector
-                    LIMIT %s
-                    """,
-                    (embedding, tenant_id, embedding, top_k),
-                )
-                rows = await cur.fetchall()
-        finally:
-            await conn.close()
+        async with self._session(tenant_id) as cur:
+            await cur.execute(
+                """
+                SELECT source, page, text, 1 - (embedding <=> %s::vector) AS similarity
+                FROM chunks
+                WHERE tenant_id = %s
+                ORDER BY embedding <=> %s::vector
+                LIMIT %s
+                """,
+                (embedding, tenant_id, embedding, top_k),
+            )
+            rows = await cur.fetchall()
         return [
             ScoredChunk(
                 chunk=Chunk(
@@ -303,9 +428,7 @@ class PgVectorStore:
             for i, r in enumerate(rows)
         ]
 
-    async def lexical_search(
-        self, query: str, *, top_k: int, tenant_id: str = "default"
-    ) -> list[ScoredChunk]:
+    async def lexical_search(self, query: str, *, top_k: int, tenant_id: str) -> list[ScoredChunk]:
         """
         Full-text search over the generated tsvector.
 
@@ -319,24 +442,20 @@ class PgVectorStore:
         reduced = lexical_query_terms(query)
         if not reduced:
             return []
-        conn = await self._connect()
-        try:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    """
-                    SELECT source, page, text,
-                           ts_rank_cd(text_search, websearch_to_tsquery('english', %s)) AS rank
-                    FROM chunks
-                    WHERE tenant_id = %s
-                      AND text_search @@ websearch_to_tsquery('english', %s)
-                    ORDER BY rank DESC
-                    LIMIT %s
-                    """,
-                    (reduced, tenant_id, reduced, top_k),
-                )
-                rows = await cur.fetchall()
-        finally:
-            await conn.close()
+        async with self._session(tenant_id) as cur:
+            await cur.execute(
+                """
+                SELECT source, page, text,
+                       ts_rank_cd(text_search, websearch_to_tsquery('english', %s)) AS rank
+                FROM chunks
+                WHERE tenant_id = %s
+                  AND text_search @@ websearch_to_tsquery('english', %s)
+                ORDER BY rank DESC
+                LIMIT %s
+                """,
+                (reduced, tenant_id, reduced, top_k),
+            )
+            rows = await cur.fetchall()
         return [
             ScoredChunk(
                 chunk=Chunk(
@@ -351,7 +470,7 @@ class PgVectorStore:
             for i, r in enumerate(rows)
         ]
 
-    async def coverage(self, *, tenant_id: str = "default") -> dict[str, list[int]]:
+    async def coverage(self, *, tenant_id: str) -> dict[str, list[int]]:
         """
         Which pages of which sources are indexed.
 
@@ -361,31 +480,21 @@ class PgVectorStore:
         retriever failure -- the same error class as scoring groundedness against a
         context too short to support the answer.
         """
-        conn = await self._connect()
-        try:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    """
-                    SELECT source, array_agg(DISTINCT page ORDER BY page) AS pages
-                    FROM chunks
-                    WHERE tenant_id = %s AND page IS NOT NULL
-                    GROUP BY source
-                    """,
-                    (tenant_id,),
-                )
-                rows = await cur.fetchall()
-        finally:
-            await conn.close()
+        async with self._session(tenant_id) as cur:
+            await cur.execute(
+                """
+                SELECT source, array_agg(DISTINCT page ORDER BY page) AS pages
+                FROM chunks
+                WHERE tenant_id = %s AND page IS NOT NULL
+                GROUP BY source
+                """,
+                (tenant_id,),
+            )
+            rows = await cur.fetchall()
         return {r["source"]: [int(p) for p in r["pages"]] for r in rows}
 
-    async def count(self, *, tenant_id: str = "default") -> int:
-        conn = await self._connect()
-        try:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT count(*) AS n FROM chunks WHERE tenant_id = %s", (tenant_id,)
-                )
-                row = await cur.fetchone()
-                return int(row["n"]) if row else 0
-        finally:
-            await conn.close()
+    async def count(self, *, tenant_id: str) -> int:
+        async with self._session(tenant_id) as cur:
+            await cur.execute("SELECT count(*) AS n FROM chunks WHERE tenant_id = %s", (tenant_id,))
+            row = await cur.fetchone()
+            return int(row["n"]) if row else 0
