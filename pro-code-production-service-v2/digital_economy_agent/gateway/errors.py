@@ -43,8 +43,29 @@ class ModelTransient(GatewayError):
 
 
 class AllModelsFailed(GatewayError):
-    """Every model in the chain was tried and none produced a completion."""
+    """
+    Every model in the chain was tried and none produced a completion.
 
-    def __init__(self, message: str, attempts: dict[str, str]) -> None:
+    ``categories`` records *why* each model failed, so a caller can distinguish a
+    transient capacity problem the client should retry from a misconfiguration it
+    never should. Without it the HTTP layer can only guess, and guessing means
+    returning 500 for a dependency failure the service did not cause.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        attempts: dict[str, str],
+        *,
+        categories: dict[str, str] | None = None,
+        retry_after: float | None = None,
+    ) -> None:
         super().__init__(message)
         self.attempts = attempts
+        self.categories = categories or {}
+        self.retry_after = retry_after
+
+    @property
+    def rate_limited_only(self) -> bool:
+        """True when every model failed purely on quota — worth retrying later."""
+        return bool(self.categories) and all(c == "rate_limited" for c in self.categories.values())

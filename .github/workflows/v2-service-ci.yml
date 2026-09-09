@@ -109,8 +109,9 @@ jobs:
         with:
           image-ref: digital-economy-agent:${{ github.sha }}
           format: table
-          # Phase 1 reports findings without blocking. Phase 4 flips this to
-          # exit-code 1 once a documented base-image update cadence exists.
-          exit-code: "0"
+          # Blocking: the image was verified at zero fixable HIGH/CRITICAL findings, so
+          # this gate is actionable rather than noise. ignore-unfixed keeps it that way
+          # — only vulnerabilities with an available fix can fail the build.
+          exit-code: "1"
           severity: HIGH,CRITICAL
           ignore-unfixed: true

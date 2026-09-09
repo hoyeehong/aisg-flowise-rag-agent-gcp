@@ -161,8 +161,17 @@ uv run ruff check . && uv run ruff format --check . \
 | Tools | `agentTools: []` — none | `Retriever` Protocol with Pydantic-validated request/response; empty retrieval is reported, not hidden |
 | Model config | Inline in graph JSON | Gateway with a fallback chain, the three-way retry taxonomy, sticky selection and per-request cost metering |
 | Prompts | Text in graph JSON | Versioned files (`write_draft.v1.md`) with a pinned loader; every report records the version that produced it |
-| Tests | None | 34 tests (24 unit, 10 integration), no network required |
+| Tests | None | 37 tests (18 unit, 19 integration), no network required |
 | Types | n/a | `mypy --strict` clean across 19 modules |
+
+### Hardening applied to the image
+
+`python:3.11-slim` ships `pip`, `setuptools` and `wheel` in the global site-packages.
+The application runs entirely from `/app/.venv` and needs none of them at runtime, while
+`setuptools`' vendored `jaraco.context` and `wheel` were contributing two HIGH CVEs
+(CVE-2026-23949, CVE-2026-24049). Removing them took fixable HIGH/CRITICAL findings from
+two to zero, which is both a smaller attack surface and one less thing to triage on every
+scan.
 
 ### Deliberate limitations
 
@@ -173,9 +182,11 @@ uv run ruff check . && uv run ruff format --check . \
   over a small fixed corpus. It exists so the graph, the API and the tests run with no
   infrastructure, and so Phase 2 has a behavioural baseline. `describe()` says so at
   runtime.
-* **The container image is unverified.** No Docker daemon was available in the
-  environment where this was written. The Dockerfile is reviewed but unbuilt; CI builds
-  it, runs it, and curls `/healthz` on every push, so the first CI run is the real test.
+* ~~The container image is unverified.~~ **Verified.** Built and run locally: healthy in
+  2s, non-root (uid 10001), Docker `HEALTHCHECK` reporting `healthy`, `uv` and `pip`
+  absent from the runtime layer, and **zero fixable HIGH/CRITICAL Trivy findings** after
+  removing the base image's build tooling. The Trivy gate in CI is therefore blocking,
+  not advisory.
 * **`/metrics` returns JSON, not Prometheus exposition format.** Phase 4 replaces it.
 
 ## 5. Phase order

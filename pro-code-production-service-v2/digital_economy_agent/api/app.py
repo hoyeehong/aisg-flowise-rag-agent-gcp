@@ -11,16 +11,17 @@ from typing import Annotated, Any, cast
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from langgraph.checkpoint.memory import InMemorySaver
 
 from .. import __version__
 from ..agents import build_graph
 from ..config import Settings, get_settings
-from ..gateway import ModelGateway, OpenAICompatibleProvider
+from ..gateway import AllModelsFailed, GatewayError, ModelGateway, OpenAICompatibleProvider
 from ..tools import Chunk, InMemoryRetriever, Retriever
 from .schemas import (
     CreateReportRequest,
+    ErrorResponse,
     HealthResponse,
     ReadyResponse,
     ReportState,
@@ -231,6 +232,50 @@ def create_app(
         except ValueError as exc:
             # e.g. a revision request with no feedback.
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+
+    @app.exception_handler(AllModelsFailed)
+    async def all_models_failed(request: Request, exc: Exception) -> JSONResponse:
+        """
+        Translate a total gateway failure into an accurate status code.
+
+        This is a *dependency* failure, not a bug in this service, so 500 is wrong: it
+        tells a caller to report a defect and tells an SLO dashboard this service is
+        broken. A capacity problem the client should retry is 503 with Retry-After;
+        anything else (bad credential, withdrawn model) is 502.
+        """
+        failure = exc if isinstance(exc, AllModelsFailed) else None
+        retryable = bool(failure and failure.rate_limited_only)
+        logger.error("model gateway exhausted: %s", exc)
+
+        headers: dict[str, str] = {}
+        if retryable and failure and failure.retry_after:
+            headers["Retry-After"] = str(int(failure.retry_after))
+
+        return JSONResponse(
+            status_code=(
+                status.HTTP_503_SERVICE_UNAVAILABLE if retryable else status.HTTP_502_BAD_GATEWAY
+            ),
+            content=ErrorResponse(
+                error="model_gateway_unavailable",
+                detail=(
+                    "Every model in the fallback chain is rate limited; retry shortly."
+                    if retryable
+                    else "No model in the fallback chain could serve this request."
+                ),
+            ).model_dump(),
+            headers=headers,
+        )
+
+    @app.exception_handler(GatewayError)
+    async def gateway_error(request: Request, exc: Exception) -> JSONResponse:
+        """Catch-all for gateway faults that escape a node without being AllModelsFailed."""
+        logger.error("model gateway error: %s", exc)
+        return JSONResponse(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            content=ErrorResponse(
+                error="model_gateway_error", detail="The model provider could not be reached."
+            ).model_dump(),
+        )
 
     @app.post("/v1/reports/stream", tags=["reports"])
     async def create_report_streaming(

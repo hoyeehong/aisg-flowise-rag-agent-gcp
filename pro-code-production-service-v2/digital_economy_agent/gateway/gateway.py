@@ -174,6 +174,8 @@ class ModelGateway:
                     f"{self.policy.cooldown_budget_seconds:.0f}s cooldown budget; "
                     f"this looks like a daily quota rather than a burst limit",
                     first.attempts,
+                    categories=first.categories,
+                    retry_after=wait,
                 ) from first
             self._cooldowns_used += 1
             logger.warning("entire model chain rate-limited; cooling down %.0fs", wait)
@@ -191,25 +193,31 @@ class ModelGateway:
         candidates = self._candidates()
         if not candidates:
             raise AllModelsFailed(
-                "every model in the chain has been retired", dict(self.stats.retired)
+                "every model in the chain has been retired",
+                dict(self.stats.retired),
+                categories={k: "unavailable" for k in self.stats.retired},
             )
 
         first_choice = candidates[0]
         attempts: dict[str, str] = {}
+        categories: dict[str, str] = {}
         for spec in candidates:
             try:
                 text, usage, tries = await self._try_model(spec, messages, temperature, max_tokens)
             except ModelUnavailable as exc:
                 self.stats.retired[spec.key] = str(exc)
                 attempts[spec.key] = f"unavailable: {exc}"
+                categories[spec.key] = "unavailable"
                 logger.error("retiring model %s for this run: %s", spec.key, exc)
                 continue
             except ModelRateLimited as exc:
                 attempts[spec.key] = f"rate limited: {exc}"
+                categories[spec.key] = "rate_limited"
                 logger.warning("model %s rate limited, advancing chain", spec.key)
                 continue
             except ModelTransient as exc:
                 attempts[spec.key] = f"transient: {exc}"
+                categories[spec.key] = "transient"
                 logger.warning("model %s still failing, advancing chain", spec.key)
                 continue
 
@@ -229,8 +237,11 @@ class ModelGateway:
                 fell_back=fell_back,
             )
 
+        waits = [d for d in self._rate_limited.values() if d is not None]
         raise AllModelsFailed(
             "all models in the chain failed: "
             + "; ".join(f"{k} ({v})" for k, v in attempts.items()),
             attempts,
+            categories=categories,
+            retry_after=min(waits) if waits else None,
         )

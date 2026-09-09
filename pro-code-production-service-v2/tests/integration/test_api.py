@@ -226,3 +226,95 @@ async def test_stream_emits_node_progress_then_final_state(client):
     final = events[-1][1]
     assert final["status"] == "awaiting_review"
     assert final["draft"]
+
+
+# ---------------------------------------------------------------------------
+# Provider-failure paths.
+#
+# These exist because an end-to-end container run against a real Groq endpoint with an
+# invalid key returned a bare 500 "Internal Server Error": every earlier test used a
+# scripted provider that never raised AllModelsFailed through the API layer. A dependency
+# failure must not be reported as a defect in this service.
+# ---------------------------------------------------------------------------
+
+
+async def _client_with_script(settings, retriever, no_sleep, script):
+    provider = FakeProvider("groq", script)
+    gateway = ModelGateway(
+        [ModelSpec(provider="groq", model=m) for m in ("primary", "secondary")],
+        {"groq": provider},
+        policy=RetryPolicy(max_attempts_per_model=1, cooldown_budget_seconds=0.0),
+        sleep=no_sleep,
+    )
+    app = create_app(settings, gateway=gateway, retriever=retriever)
+    return app
+
+
+async def test_invalid_credentials_return_502_not_500(settings, retriever, no_sleep):
+    """A bad API key is an upstream misconfiguration: 502, with a structured body."""
+    from digital_economy_agent.gateway import ModelUnavailable
+
+    app = await _client_with_script(
+        settings,
+        retriever,
+        no_sleep,
+        {
+            "primary": [ModelUnavailable("primary: HTTP 401: Invalid API Key")],
+            "secondary": [ModelUnavailable("secondary: HTTP 401: Invalid API Key")],
+        },
+    )
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.post("/v1/reports", json={"question": "Digital trust in SEA"})
+
+    assert r.status_code == 502
+    body = r.json()
+    assert body["error"] == "model_gateway_unavailable"
+    assert body["detail"]
+    # The provider's raw message must not leak to the caller.
+    assert "Invalid API Key" not in r.text
+
+
+async def test_total_rate_limit_returns_503_with_retry_after(settings, retriever, no_sleep):
+    """Pure quota exhaustion is retryable, so 503 + Retry-After rather than 502."""
+    from digital_economy_agent.gateway import ModelRateLimited
+
+    app = await _client_with_script(
+        settings,
+        retriever,
+        no_sleep,
+        {
+            "primary": [ModelRateLimited("primary: quota", retry_after=30.0)],
+            "secondary": [ModelRateLimited("secondary: quota", retry_after=45.0)],
+        },
+    )
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.post("/v1/reports", json={"question": "Digital trust in SEA"})
+
+    assert r.status_code == 503
+    assert r.headers["retry-after"] == "30", "should advertise the soonest reset"
+    assert r.json()["error"] == "model_gateway_unavailable"
+
+
+async def test_partial_failure_still_succeeds_via_fallback(settings, retriever, no_sleep):
+    """One dead model must not fail the request when a sibling can serve it."""
+    from digital_economy_agent.gateway import ModelUnavailable
+
+    app = await _client_with_script(
+        settings,
+        retriever,
+        no_sleep,
+        {"primary": [ModelUnavailable("primary: HTTP 404 withdrawn")]},
+    )
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.post("/v1/reports", json={"question": "Digital trust in SEA"})
+            metrics = (await c.get("/metrics")).json()
+
+    assert r.status_code == 202
+    assert r.json()["cost"]["models_used"] == ["groq/secondary"]
+    assert metrics["retired_models"] == ["groq/primary"]
