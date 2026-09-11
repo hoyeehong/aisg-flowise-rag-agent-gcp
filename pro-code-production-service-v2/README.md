@@ -262,6 +262,51 @@ subscriptions that have one, so without it the consumer's retry ceiling never fi
 agent* also gets publisher and subscriber bindings — omitting those is the usual reason a
 dead-letter policy silently does nothing.
 
+### Verified against real Pub/Sub
+
+The emulator cannot answer two questions: whether the IAM is right, because it does not
+enforce IAM at all, and whether the broker's own dead-letter policy actually fires. Both
+were checked by applying the Pub/Sub and IAM resources to a throwaway project with **no
+billing account attached** — a project that cannot be charged is a firmer guarantee than
+a list of resources believed to be free. Cloud Run, Artifact Registry and Secret Manager
+refuse to enable without billing, so a local `*_override.tf` narrowed the API list for
+the run; the project was deleted afterwards.
+
+Pub/Sub stored the subscription exactly as declared — `ackDeadlineSeconds: 120`,
+`maxDeliveryAttempts: 5`, backoff 10s–600s, and `expirationPolicy: {}`, confirming that
+`ttl = ""` means never expire rather than expire immediately.
+
+The IAM came out as intended, which is the part worth stating as a result rather than an
+intention:
+
+| resource | binding |
+| --- | --- |
+| dead-letter topic | `pubsub.publisher` → the Pub/Sub service agent, and nothing else |
+| document topic | no bindings at all — the runtime identity cannot publish |
+| subscription | `pubsub.subscriber` → the runtime identity and the service agent |
+
+The service agent's address is built from `data.google_project.current.number`, and a
+wrong construction there fails quietly: the binding would name a principal that does not
+exist and dead-lettering would simply never happen. It resolved and bound correctly.
+
+Then the behaviour itself. A message nacked repeatedly climbed through delivery attempts
+1, 2, 4 and 5 under real exponential backoff and was moved to the dead-letter topic:
+
+```
+CloudPubSubDeadLetterSourceDeliveryCount       = 5
+CloudPubSubDeadLetterSourceSubscription        = digital-economy-agent-documents-sub
+CloudPubSubDeadLetterSourceSubscriptionProject = <scratch project>
+```
+
+**One finding worth carrying:** the dead-lettered message arrives with a *different*
+`messageId` from the one published. Pub/Sub re-publishes rather than forwarding, and
+attaches its own `CloudPubSubDeadLetterSource*` attributes. The application-level sink in
+`PubSubDeadLetters` does something different — it preserves the original id under
+`original_message_id` and adds `dead_letter_reason`. So the dead-letter topic carries two
+shapes of metadata, one per path: the broker's, for messages never successfully
+processed, and the service's, for messages processed and judged undeliverable. Anything
+triaging that topic has to handle both.
+
 ### Phase 5 limitations
 
 * **Checkpoint state is not covered by the policy.** The LangGraph checkpoint tables have
@@ -275,13 +320,17 @@ dead-letter policy silently does nothing.
   batch" is wrong while `ingest_pdf(max_pages=N)` makes partial ingestion legitimate —
   reconciliation needs an explicit complete-document signal, and deletion is the wrong
   direction to guess in.
-* **The Pub/Sub adapter is verified against the emulator, not the real service.** Eight
-  integration tests exercise the field mapping, acknowledgement, nack-as-zero-deadline,
-  the delivery-attempt guard and dead-lettering on every pull request, and CI fails if
-  they skip. The emulator speaks the real protocol but is not the real service: it does
-  not enforce IAM, so no authorisation behaviour is covered, and it does not implement
-  `oldest_unacked_message_age`, which Pub/Sub exposes through Cloud Monitoring rather
-  than the data plane.
+* **The adapter's client code has not run against real Pub/Sub.** Eight integration
+  tests exercise the field mapping, acknowledgement, nack-as-zero-deadline, the
+  delivery-attempt guard and dead-lettering against the emulator on every pull request,
+  and CI fails if they skip. What has *not* run against the real service is this
+  repository's own client code: doing so needs Application Default Credentials, which a
+  CI run does not have. The infrastructure it depends on has been verified there
+  separately — see "Verified against real Pub/Sub" above.
+* **`oldest_unacked_message_age` is still unimplemented.** Pub/Sub exposes it through
+  Cloud Monitoring rather than the data plane, so `oldest_unacked_age_seconds()` returns
+  None and the consumer records -1. Backlog alerting has to be defined against the Cloud
+  Monitoring metric instead, and nothing here does that yet.
 * **The event path's trust boundary is coarse.** The tenant comes from the message body,
   so whoever can publish to the topic can write to any tenant they name. The
   authorisation boundary is the topic's IAM policy; narrowing it means a topic per tenant
@@ -293,8 +342,12 @@ dead-letter policy silently does nothing.
 * **Migrations still run at startup.** Every starting pod applies the schema, which needs
   an ownership-carrying DSN alongside the least-privilege one. A Job that runs once per
   release is the better shape.
-* **Helm and Terraform remain unapplied.** Both validate; neither has been deployed to a
-  cluster or a project.
+* **Most of Terraform, and all of Helm, remain unapplied.** The Pub/Sub and IAM
+  resources have been applied to a scratch project and verified (above). Cloud SQL,
+  Cloud Run, Secret Manager and Artifact Registry have not: Cloud SQL needs a Private
+  Service Access allocation and VPC peering that a fresh project does not have, and the
+  apply would fail at that resource having already created the ten before it. The Helm
+  chart has never been installed to a cluster.
 
 ---
 
