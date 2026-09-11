@@ -323,6 +323,54 @@ async def test_count_mismatch_is_rejected(store, tenant):
 # --- search ----------------------------------------------------------------
 
 
+async def test_lexical_ordering_is_independent_of_insert_order(store, tenant):
+    """
+    Tied lexical scores must be broken deterministically, not by physical row order.
+
+    ``ts_rank_cd`` gives most matches the same score -- on the golden set, 13-14 of any
+    top 20 share one. With only ``ORDER BY rank DESC`` those ties came back in heap
+    order, so the same corpus ingested into two tenants ranked differently in 9 of 10
+    golden cases and the retrieval eval moved with it: recall_normalised read 0.580 or
+    0.560 depending on nothing but where the rows happened to land. The CI baseline had
+    recorded one of those samples as if it were a fixed property.
+
+    This builds the tie deliberately -- identical text on four pages, so identical rank
+    -- and inserts it in opposite orders into two tenants. The orderings must match.
+    """
+    identical = [
+        Chunk(
+            text="Digital trust governance framework applies across member states.",
+            source="tie.pdf",
+            page=page,
+        )
+        for page in (1, 2, 3, 4)
+    ]
+    emb = HashingEmbedder()
+    vectors = await emb.embed([c.text for c in identical], task=EmbedTask.DOCUMENT)
+
+    forward, backward = f"{tenant}-fwd", f"{tenant}-rev"
+    await store.upsert(identical, vectors, embedder=emb.name, tenant_id=forward)
+    await store.upsert(
+        list(reversed(identical)), list(reversed(vectors)), embedder=emb.name, tenant_id=backward
+    )
+    try:
+        a = await store.lexical_search("digital trust governance", top_k=10, tenant_id=forward)
+        b = await store.lexical_search("digital trust governance", top_k=10, tenant_id=backward)
+        assert [c.chunk.page for c in a] == [c.chunk.page for c in b], (
+            "tied lexical results depend on insert order; the ORDER BY needs a "
+            "deterministic tie-break"
+        )
+        # The premise: these really are ties. If ts_rank_cd ever stops tying them the
+        # test would pass for the wrong reason.
+        assert len({round(c.score, 9) for c in a}) == 1, "expected identical scores"
+    finally:
+        import psycopg
+
+        with psycopg.connect(DSN) as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM chunks WHERE tenant_id IN (%s, %s)", (forward, backward))
+            conn.commit()
+
+
 async def test_lexical_search_finds_exact_identifiers(seeded):
     """
     The half vectors are bad at.

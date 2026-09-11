@@ -528,7 +528,16 @@ class PgVectorStore:
                 FROM chunks
                 WHERE tenant_id = %s
                   AND text_search @@ websearch_to_tsquery('english', %s)
-                ORDER BY rank DESC
+                -- The tie-break is load-bearing, not cosmetic. ts_rank_cd gives most
+                -- matches the same score -- measured on the golden set, 13-14 of any
+                -- top 20 share one -- and without a deterministic second key Postgres
+                -- returns tied rows in physical scan order. That order depends on
+                -- where rows happen to sit in the heap, so the same corpus ingested
+                -- into two tenants ranked differently in 9 of 10 golden cases and the
+                -- eval's recall moved with it. Applied to the lexical half only:
+                -- adding sort keys after the vector distance would stop the HNSW
+                -- index being usable, and float distances essentially never tie.
+                ORDER BY rank DESC, source, page, content_hash
                 LIMIT %s
                 """,
                 (reduced, tenant_id, reduced, top_k),
