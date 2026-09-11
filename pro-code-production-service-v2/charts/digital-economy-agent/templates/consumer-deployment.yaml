@@ -1,27 +1,37 @@
+{{- if .Values.consumer.enabled }}
+# The consumer is its own workload, not a thread inside the API. The two scale on
+# different signals -- the API on request latency, this on subscription backlog -- and
+# a burst of ingestion should neither slow report generation nor be throttled by an
+# HPA watching request rate.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "agent.fullname" . }}
+  name: {{ include "agent.fullname" . }}-consumer
   labels: {{- include "agent.labels" . | nindent 4 }}
 spec:
-  {{- if not .Values.autoscaling.enabled }}
-  replicas: {{ .Values.replicaCount }}
-  {{- end }}
+  replicas: {{ .Values.consumer.replicaCount }}
   selector:
-    matchLabels: {{- include "agent.apiSelectorLabels" . | nindent 6 }}
+    matchLabels: {{- include "agent.consumerSelectorLabels" . | nindent 6 }}
+  strategy:
+    # Recreate, not RollingUpdate. Pub/Sub redelivers anything the old pod held, so
+    # overlapping pods would process the same messages twice -- safe, because effects
+    # are idempotent, but it doubles the embedding bill during every deploy.
+    type: Recreate
   template:
     metadata:
-      labels: {{- include "agent.apiSelectorLabels" . | nindent 8 }}
+      labels: {{- include "agent.consumerSelectorLabels" . | nindent 8 }}
       annotations:
-        # Roll the pods when non-secret config changes. Without this a ConfigMap edit
-        # leaves every running pod on the old values with no indication why.
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         prometheus.io/scrape: "true"
-        prometheus.io/port: {{ .Values.service.targetPort | quote }}
+        prometheus.io/port: {{ .Values.consumer.port | quote }}
         prometheus.io/path: /metrics
     spec:
       serviceAccountName: {{ include "agent.serviceAccountName" . }}
       securityContext: {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # Long enough for an in-flight batch to finish and acknowledge. The process
+      # handles SIGTERM and stops pulling; killed mid-handler, every message it held is
+      # redelivered instead.
+      terminationGracePeriodSeconds: {{ .Values.consumer.terminationGracePeriodSeconds }}
       {{- with .Values.nodeSelector }}
       nodeSelector: {{- toYaml . | nindent 8 }}
       {{- end }}
@@ -31,26 +41,29 @@ spec:
       {{- with .Values.affinity }}
       affinity: {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.topologySpreadConstraints }}
-      topologySpreadConstraints: {{- toYaml . | nindent 8 }}
-      {{- end }}
       containers:
-        - name: agent
+        - name: consumer
           image: {{ include "agent.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext: {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          command: ["python", "-m", "digital_economy_agent.messaging"]
           ports:
-            - name: http
-              containerPort: {{ .Values.service.targetPort }}
+            - name: metrics
+              containerPort: {{ .Values.consumer.port }}
           envFrom:
             - configMapRef:
                 name: {{ include "agent.fullname" . }}-config
           env:
-            - name: AGENT_GROQ_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.existingSecret.name }}
-                  key: {{ .Values.existingSecret.keys.groqApiKey }}
+            - name: AGENT_CONSUMER_PORT
+              value: {{ .Values.consumer.port | quote }}
+            - name: AGENT_PUBSUB_SUBSCRIPTION
+              value: {{ required "consumer.subscription is required when the consumer is enabled" .Values.consumer.subscription | quote }}
+            - name: AGENT_PUBSUB_DEAD_LETTER_TOPIC
+              value: {{ .Values.consumer.deadLetterTopic | quote }}
+            - name: AGENT_CONSUMER_CONCURRENCY
+              value: {{ .Values.consumer.concurrency | quote }}
+            - name: AGENT_CONSUMER_MAX_DELIVERY_ATTEMPTS
+              value: {{ .Values.consumer.maxDeliveryAttempts | quote }}
             - name: AGENT_GEMINI_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -75,36 +88,32 @@ spec:
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          # Startup probe first: it gates the others, so schema application and
-          # checkpointer migrations cannot trip the liveness probe into a restart loop.
-          startupProbe:
-            httpGet:
-              path: {{ .Values.probes.startup.path }}
-              port: http
-            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
-            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+          # Liveness stays up while the process is up: restarting cannot fix a broker
+          # outage, and a failing liveness probe would turn one into a crashloop.
           livenessProbe:
             httpGet:
-              path: {{ .Values.probes.liveness.path }}
-              port: http
+              path: /healthz
+              port: metrics
             initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
             timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
             failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          # Readiness reports whether the poll loop is actually running. A pod whose
+          # consumer task died but whose process survived would otherwise look healthy
+          # while draining nothing.
           readinessProbe:
             httpGet:
-              path: {{ .Values.probes.readiness.path }}
-              port: http
+              path: /readyz
+              port: metrics
             initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
             timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
             failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
-          resources: {{- toYaml .Values.resources | nindent 12 }}
+          resources: {{- toYaml .Values.consumer.resources | nindent 12 }}
           volumeMounts:
-            # readOnlyRootFilesystem is on, so anything that writes needs an explicit
-            # mount. /tmp is the only one this service uses.
             - name: tmp
               mountPath: /tmp
       volumes:
         - name: tmp
           emptyDir: {}
+{{- end }}

@@ -10,4 +10,4 @@ spec:
       targetPort: http
       protocol: TCP
       name: http
-  selector: {{- include "agent.selectorLabels" . | nindent 4 }}
+  selector: {{- include "agent.apiSelectorLabels" . | nindent 4 }}

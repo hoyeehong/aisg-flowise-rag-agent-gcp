@@ -11,6 +11,7 @@ larger operational cost than the marginal vector performance difference at this 
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
@@ -26,6 +27,8 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from ..tools.types import Chunk
+
+logger = logging.getLogger(__name__)
 
 _SCHEMA = Path(__file__).parent / "schema.sql"
 
@@ -289,11 +292,30 @@ class PgVectorStore:
                             ident, sql.Literal(password)
                         )
                     )
-                await cur.execute(
-                    sql.SQL("ALTER ROLE {} NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE").format(
-                        ident
+                try:
+                    await cur.execute(
+                        sql.SQL(
+                            "ALTER ROLE {} NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE"
+                        ).format(ident)
                     )
-                )
+                except psycopg.errors.InsufficientPrivilege:
+                    # Managed Postgres -- Cloud SQL among them -- gives its
+                    # administrative user broad rights but not true superuser, and
+                    # changing BYPASSRLS requires one. Aborting here would fail
+                    # bootstrap on exactly the platform this deploys to.
+                    #
+                    # Non-fatal because the attribute is not the thing that matters:
+                    # whether the policy is in force is, and isolation_status()
+                    # measures that directly and reports it through /readyz. An
+                    # attribute that could not be set surfaces there as
+                    # enforced=false, not as a silent assumption.
+                    await conn.rollback()
+                    logger.warning(
+                        "could not clear SUPERUSER/BYPASSRLS on %r: the administrative "
+                        "role lacks the privilege. Isolation is still verified at "
+                        "startup -- see the tenant_isolation check in /readyz.",
+                        role,
+                    )
                 await cur.execute(
                     sql.SQL("GRANT SELECT, INSERT, UPDATE, DELETE ON chunks TO {}").format(ident)
                 )

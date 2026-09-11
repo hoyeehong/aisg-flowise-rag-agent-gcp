@@ -37,3 +37,18 @@ output "generated_db_password" {
   value       = random_password.app_user.result
   sensitive   = true
 }
+
+output "documents_topic" {
+  description = "Topic that ingestion events are published to."
+  value       = google_pubsub_topic.documents.id
+}
+
+output "documents_subscription" {
+  description = "Set as AGENT_PUBSUB_SUBSCRIPTION on the consumer workload."
+  value       = google_pubsub_subscription.documents.id
+}
+
+output "documents_dead_letter_topic" {
+  description = "Set as AGENT_PUBSUB_DEAD_LETTER_TOPIC. Watch its message count: anything here failed every delivery attempt and needs a human."
+  value       = google_pubsub_topic.documents_dead_letter.id
+}

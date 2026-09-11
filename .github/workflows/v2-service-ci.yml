@@ -552,6 +552,42 @@ jobs:
           grep -q 'kind: ServiceMonitor' /tmp/full.yaml \
             || { echo "::error::ServiceMonitor missing when enabled"; exit 1; }
 
+          # The consumer is a second workload, off by default.
+          ! grep -q 'name: rel-digital-economy-agent-consumer' /tmp/default.yaml \
+            || { echo "::error::consumer rendered while disabled"; exit 1; }
+          # Enabling it without a subscription must fail the render rather than deploy
+          # a pod that goes ready and consumes nothing.
+          if render --set consumer.enabled=true > /tmp/nosub.yaml 2>&1; then
+            echo "::error::consumer rendered with no subscription configured"; exit 1
+          fi
+          render --set consumer.enabled=true \
+                 --set consumer.subscription=projects/p/subscriptions/docs \
+                 --set consumer.deadLetterTopic=projects/p/topics/docs-dlq \
+                 > /tmp/consumer.yaml
+          grep -q 'name: rel-digital-economy-agent-consumer' /tmp/consumer.yaml \
+            || { echo "::error::consumer Deployment missing when enabled"; exit 1; }
+
+          # The API Service must not select consumer pods. Both workloads share a
+          # release, and before component labels the base selector matched every pod --
+          # so the API Service would have routed HTTP to a process serving only probes,
+          # on a different port. A grep cannot see this; the label sets have to be
+          # compared.
+          python3 - <<'SELECTORS'
+          import sys, yaml
+          docs = [d for d in yaml.safe_load_all(open("/tmp/consumer.yaml")) if d]
+          svc = next(d for d in docs
+                     if d["kind"] == "Service" and not d["metadata"]["name"].endswith("consumer"))
+          pods = {d["metadata"]["name"].endswith("consumer"):
+                  d["spec"]["template"]["metadata"]["labels"]
+                  for d in docs if d["kind"] == "Deployment"}
+          sel = svc["spec"]["selector"]
+          if all(pods[True].get(k) == v for k, v in sel.items()):
+              sys.exit("::error::the API Service selects consumer pods")
+          if not all(pods[False].get(k) == v for k, v in sel.items()):
+              sys.exit("::error::the API Service no longer selects its own pods")
+          print("service selectors are disjoint")
+          SELECTORS
+
       - name: Validate rendered manifests against the Kubernetes schema
         # helm lint checks templating, not whether the result is a valid object. This
         # catches a mistyped field that renders cleanly and is rejected by the API server.
@@ -565,7 +601,7 @@ jobs:
           set -e
           docker run --rm -v /tmp:/tmp ghcr.io/yannh/kubeconform:v0.6.7 \
             -summary -strict -kubernetes-version 1.30.0 \
-            /tmp/default.yaml /tmp/fixed.yaml /tmp/digest.yaml
+            /tmp/default.yaml /tmp/fixed.yaml /tmp/digest.yaml /tmp/consumer.yaml
 
           docker run --rm -v /tmp:/tmp ghcr.io/yannh/kubeconform:v0.6.7 \
             -summary -strict -kubernetes-version 1.30.0 -ignore-missing-schemas \

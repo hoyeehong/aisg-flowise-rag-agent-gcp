@@ -124,6 +124,27 @@ class Settings(BaseSettings):
     # `allow_hashing_embedder` is: a missing credential must not quietly become an
     # accepted configuration, and `/readyz` reports the difference.
     allow_anonymous_tenant: bool = False
+
+    # --- event-driven ingestion ------------------------------------------------
+    # Full resource name, e.g. projects/<p>/subscriptions/<s>. Empty means the
+    # consumer has nothing to attach to and refuses to start, rather than idling in a
+    # ready-looking pod that consumes nothing.
+    pubsub_subscription: str = ""
+    # Where a message that exhausted its retries is sent. Empty is permitted but
+    # reported: without a sink the consumer nacks forever rather than dropping the
+    # payload, so a poison message becomes an endlessly redelivered one.
+    pubsub_dead_letter_topic: str = ""
+    consumer_max_delivery_attempts: int = Field(default=5, ge=1, le=100)
+    # Bounded because the embedding provider rate-limits. Letting the broker set the
+    # fan-out turns a backlog into a wall of 429s, which the gateway backs off on,
+    # which makes the backlog worse.
+    consumer_concurrency: int = Field(default=4, ge=1, le=64)
+    consumer_max_messages: int = Field(default=10, ge=1, le=1000)
+    consumer_poll_interval_seconds: float = Field(default=1.0, gt=0, le=60)
+    # The consumer serves /healthz, /readyz and /metrics on this port. Without it a
+    # Kubernetes Deployment has no probe target and Prometheus has nothing to scrape,
+    # so a stalled consumer would be indistinguishable from an idle one.
+    consumer_port: int = Field(default=8081, ge=1, le=65535)
     # Opting in to the deterministic embedder is a configuration decision, not a
     # degradation: it is how retrieval is evaluated in CI without an API key. Left
     # false, a missing embedding credential correctly reports the service as degraded,
