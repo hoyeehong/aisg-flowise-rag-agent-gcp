@@ -8,3 +8,7 @@
 *.tfvars
 !example.tfvars
 crash.log
+# Terraform merges these over the real configuration, so a stray one silently changes
+# what an apply does. Scratch overrides must stay local.
+*_override.tf
+*_override.tf.json
