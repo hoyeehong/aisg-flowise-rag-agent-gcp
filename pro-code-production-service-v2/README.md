@@ -275,10 +275,13 @@ dead-letter policy silently does nothing.
   batch" is wrong while `ingest_pdf(max_pages=N)` makes partial ingestion legitimate —
   reconciliation needs an explicit complete-document signal, and deletion is the wrong
   direction to guess in.
-* **The Pub/Sub adapter has never run against a live broker.** Only its import guard
-  executes in CI. The mapping it performs — ack ids, delivery attempts, nack as a
-  zero-second deadline — is unverified, and it is the component most likely to be subtly
-  wrong. The emulator belongs in CI; it is not there yet.
+* **The Pub/Sub adapter is verified against the emulator, not the real service.** Eight
+  integration tests exercise the field mapping, acknowledgement, nack-as-zero-deadline,
+  the delivery-attempt guard and dead-lettering on every pull request, and CI fails if
+  they skip. The emulator speaks the real protocol but is not the real service: it does
+  not enforce IAM, so no authorisation behaviour is covered, and it does not implement
+  `oldest_unacked_message_age`, which Pub/Sub exposes through Cloud Monitoring rather
+  than the data plane.
 * **The event path's trust boundary is coarse.** The tenant comes from the message body,
   so whoever can publish to the topic can write to any tenant they name. The
   authorisation boundary is the topic's IAM policy; narrowing it means a topic per tenant

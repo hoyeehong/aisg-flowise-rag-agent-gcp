@@ -122,6 +122,10 @@ jobs:
 
     env:
       TEST_POSTGRES_DSN: postgresql://postgres:devpass@localhost:5432/agent
+      # The client library reads this itself and routes to the emulator, async
+      # transport included. Set at job level so the integration tests find it.
+      PUBSUB_EMULATOR_HOST: localhost:8085
+      PUBSUB_PROJECT_ID: test-project
 
     steps:
       - uses: actions/checkout@v7.0.1
@@ -141,7 +145,38 @@ jobs:
         # Prefect decorators under TYPE_CHECKING. Without it installed, mypy cannot see
         # them and the type checking of that module would be vacuous. The
         # optional-deps job below separately proves Prefect remains optional at runtime.
-        run: uv sync --frozen --extra dev --extra ingestion
+        #
+        # The events extra is included for the same reason, and for a second one: until
+        # it was, mypy treated the whole Pub/Sub adapter as untyped and its own
+        # integration tests skipped themselves, so the least-verified module in the
+        # service was also the one CI said least about.
+        run: uv sync --frozen --extra dev --extra ingestion --extra events
+
+      - name: Start the Pub/Sub emulator
+        # Not a service container: `services:` cannot override an image's command, and
+        # the Cloud SDK image needs one to start the emulator at all. Run from the
+        # repository root because `defaults.run.working-directory` is irrelevant to
+        # docker, and pinned by digest: the Cloud SDK publishes only a floating
+        # `:emulators` tag, so a tag would let the broker under test change without
+        # anything in this repository changing.
+        working-directory: .
+        run: |
+          set -euo pipefail
+          docker run -d --name pubsub-emulator -p 8085:8085 \
+            gcr.io/google.com/cloudsdktool/google-cloud-cli@sha256:45a15cc163d2df13137478856b4b9bb90426100fa8aec542269460c10110b727 \
+            gcloud beta emulators pubsub start \
+              --host-port=0.0.0.0:8085 --project=test-project
+          # The emulator answers "Ok" over HTTP on the same port once the gRPC server
+          # is listening, which makes readiness observable without a client.
+          for i in $(seq 1 60); do
+            if [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8085 || true)" = "200" ]; then
+              echo "emulator ready after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::the Pub/Sub emulator never became ready"
+          docker logs pubsub-emulator
+          exit 1
 
       - name: Ruff (lint)
         run: uv run ruff check --output-format=github .
@@ -174,18 +209,35 @@ jobs:
         # depends on an API being up or in quota. Postgres is real, by design.
         run: uv run pytest -q --junitxml=junit.xml
 
-      - name: Assert retrieval tests actually ran
-        # Guards against the skip-if-unavailable marker quietly disabling this suite.
+      - name: Assert the integration suites actually ran
+        # Every one of these skips itself when its dependency is unreachable, which
+        # means a broken service container looks identical to a green build. This is
+        # the check that tells the difference -- and each suite listed here covers a
+        # module whose bugs have historically been invisible to the unit tests.
         run: |
           uv run python - <<'EOF'
           import xml.etree.ElementTree as ET
+
+          SUITES = {
+              "test_retrieval_pg": "Postgres with pgvector",
+              "test_durability_pg": "the Postgres checkpointer",
+              "test_consumer_pg": "the consumer against Postgres",
+              "test_pubsub_emulator": "the Pub/Sub emulator",
+          }
           root = ET.parse("junit.xml").getroot()
-          cases = [c for c in root.iter("testcase")
-                   if "test_retrieval_pg" in (c.get("classname") or "")]
-          skipped = [c for c in cases if c.find("skipped") is not None]
-          print(f"retrieval integration tests: {len(cases)} collected, {len(skipped)} skipped")
-          if not cases or skipped:
-              raise SystemExit("::error::retrieval integration tests did not run against Postgres")
+          failures = []
+          for module, dependency in SUITES.items():
+              cases = [c for c in root.iter("testcase") if module in (c.get("classname") or "")]
+              skipped = [c for c in cases if c.find("skipped") is not None]
+              print(f"{module}: {len(cases)} collected, {len(skipped)} skipped")
+              if not cases:
+                  failures.append(f"{module} collected nothing")
+              elif skipped:
+                  failures.append(f"{module} skipped {len(skipped)} case(s) -- {dependency} unreachable")
+          if failures:
+              for f in failures:
+                  print(f"::error::{f}")
+              raise SystemExit("integration suites did not run against their real dependencies")
           EOF
 
       - name: Upload test results

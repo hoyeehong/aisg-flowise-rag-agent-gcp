@@ -15,14 +15,25 @@ WORKDIR /app
 # Dependency layer first: it changes far less often than application code, so it stays
 # cached across source edits. --frozen fails the build if uv.lock is stale, which keeps
 # the image reproducible rather than silently resolving new versions.
+#
+# The events extra is installed because one image serves both workloads: the Helm
+# chart runs the API with uvicorn and the consumer with
+# `python -m digital_economy_agent.messaging`, and the consumer needs the Pub/Sub
+# client. Without it the consumer pod starts, imports, and dies with an ImportError --
+# which is exactly what the first version of that Deployment would have done.
+#
+# The dependency stays optional at the package level, which is what the optional-deps
+# job proves: importing the service never requires a broker client. Carrying it here is
+# a packaging decision, and the alternative -- two images to build, scan, sign and
+# attest -- costs more than the few megabytes it saves the API.
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --no-dev
+    uv sync --frozen --no-install-project --no-dev --extra events
 
 COPY digital_economy_agent ./digital_economy_agent
 COPY README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev
+    uv sync --frozen --no-dev --extra events
 
 # ---------------------------------------------------------------------------
 # Runtime stage: no uv, no build tooling, no package manager caches.

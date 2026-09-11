@@ -31,6 +31,26 @@ def _settings(**overrides: object) -> Settings:
 # --- refusing to start ------------------------------------------------------
 
 
+def test_no_database_is_fatal_with_a_useful_message() -> None:
+    """
+    Checked before connecting, because psycopg's own failure is unhelpful here: with
+    no DSN it falls back to a local Unix socket and reports
+    /var/run/postgresql/.s.PGSQL.5432 as unreachable, naming a socket nobody
+    configured rather than the setting that is missing. Observed running the
+    entrypoint inside the container image.
+    """
+    import asyncio
+    from argparse import Namespace
+
+    from digital_economy_agent.messaging.__main__ import _run
+
+    settings = _settings(postgres_dsn="")
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("digital_economy_agent.messaging.__main__.get_settings", lambda: settings)
+        with pytest.raises(SystemExit, match="no database"):
+            asyncio.run(_run(Namespace(allow_hashing_embedder=True)))
+
+
 def test_no_embedding_credentials_is_fatal() -> None:
     """
     Falling back silently would write vectors with no semantic recall into the same

@@ -18,5 +18,30 @@ services:
       timeout: 3s
       retries: 12
 
+  pubsub:
+    # Same image and flags CI uses, so a test that passes locally runs against the
+    # same broker implementation rather than a similar one.
+    #
+    # Pinned by digest, not by tag. The Cloud SDK publishes a floating `:emulators`
+    # tag and no versioned emulator tags, so a tag here would mean the broker under
+    # test could change without anything in this repository changing.
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli@sha256:45a15cc163d2df13137478856b4b9bb90426100fa8aec542269460c10110b727
+    command:
+      - gcloud
+      - beta
+      - emulators
+      - pubsub
+      - start
+      - --host-port=0.0.0.0:8085
+      - --project=test-project
+    ports:
+      - "8085:8085"
+    healthcheck:
+      # The emulator answers "Ok" over HTTP on the gRPC port once it is listening.
+      test: ["CMD-SHELL", "curl -sf http://localhost:8085 >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
 volumes:
   pgdata:
