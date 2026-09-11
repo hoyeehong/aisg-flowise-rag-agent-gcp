@@ -16,6 +16,7 @@ import uuid
 from collections.abc import Iterator
 
 import pytest
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from digital_economy_agent.ingestion import PatternRedactor, ingest_pages
 from digital_economy_agent.retrieval import (
@@ -30,6 +31,24 @@ from digital_economy_agent.tools import RetrievalRequest
 from digital_economy_agent.tools.types import Chunk
 
 DSN = os.getenv("TEST_POSTGRES_DSN", "postgresql://postgres:devpass@localhost:55432/agent")
+
+# Tests query as the least-privilege application role, not as the administrative role
+# in TEST_POSTGRES_DSN. This is the difference between testing row-level security and
+# testing around it: a superuser ignores policies entirely, so the first version of
+# this schema was enabled, forced, and inert -- an unscoped count returned 299 rows
+# with all 19 of these tests green. Credentials are local-container only.
+APP_ROLE = "agent_app"
+APP_PASSWORD = "apppass"
+
+
+def _app_dsn(admin_dsn: str) -> str:
+    info = conninfo_to_dict(admin_dsn)
+    info["user"] = APP_ROLE
+    info["password"] = APP_PASSWORD
+    return make_conninfo(**info)
+
+
+APP_DSN = _app_dsn(DSN)
 
 
 def _postgres_available() -> bool:
@@ -80,6 +99,10 @@ def tenant() -> Iterator[str]:
     Cleanup matters: without it every run left its rows behind, and a local database
     accumulated 130+ dead tenants over the course of Phase 2 and 3. That is slow, and
     it makes ad-hoc inspection of the table useless.
+
+    Runs on the administrative connection on purpose. An unscoped ``DELETE`` as the
+    application role now matches zero rows -- the policy failing closed, which is the
+    behaviour being tested elsewhere in this file rather than a problem to work around.
     """
     name = f"test-{uuid.uuid4().hex[:12]}"
     yield name
@@ -95,10 +118,21 @@ def tenant() -> Iterator[str]:
 
 
 @pytest.fixture
-async def store() -> PgVectorStore:
+async def admin_store() -> PgVectorStore:
+    """
+    Store on the administrative connection. DDL and role management need ownership,
+    which the application role deliberately does not have.
+    """
     s = PgVectorStore(DSN)
     await s.ensure_schema()
+    await s.ensure_app_role(APP_ROLE, password=APP_PASSWORD)
     return s
+
+
+@pytest.fixture
+async def store(admin_store: PgVectorStore) -> PgVectorStore:
+    """The store as the service uses it: the app role, subject to the RLS policy."""
+    return PgVectorStore(APP_DSN)
 
 
 @pytest.fixture
@@ -109,12 +143,121 @@ async def seeded(store, tenant):
     return store, emb, tenant
 
 
+# --- tenant isolation (row-level security) ---------------------------------
+
+
+async def test_isolation_is_enforced_for_the_app_role(store):
+    """
+    The app role must be genuinely subject to the policy, not merely covered by one.
+
+    Asserting ``enforced`` rather than ``rls_enabled`` is the whole point: the first
+    version of this schema had RLS enabled and forced, a correct policy, and no
+    enforcement at all, because the connection was a superuser.
+    """
+    status = await store.isolation_status()
+    assert status["enforced"] is True, status
+    assert status["is_superuser"] is False
+    assert status["bypasses_rls"] is False
+    assert status["unscoped_visible_rows"] == 0
+
+
+async def test_superuser_connection_reports_isolation_unenforced(admin_store, seeded):
+    """
+    Regression test for the bug this feature shipped with.
+
+    A superuser bypasses RLS, so isolation is not in force on that connection even
+    though every table-level fact looks right. The probe must say so instead of
+    reporting the configuration and letting the reader infer enforcement.
+    """
+    status = await admin_store.isolation_status()
+    assert status["is_superuser"] is True
+    assert status["rls_enabled"] is True
+    assert status["policy_present"] is True
+    # Configuration correct, enforcement absent -- exactly the state that passed tests.
+    assert status["enforced"] is False, status
+
+
+async def test_unscoped_connection_reads_nothing(seeded):
+    """A connection that never sets app.tenant_id sees zero rows, not every row."""
+    import psycopg
+
+    _, _, tenant = seeded
+    async with await psycopg.AsyncConnection.connect(APP_DSN) as conn, conn.cursor() as cur:
+        await cur.execute("SELECT count(*) FROM chunks")
+        assert (await cur.fetchone())[0] == 0
+        # Naming the tenant in the WHERE clause does not help: the policy still has no
+        # tenant to compare against, so the predicate is NULL for every row.
+        await cur.execute("SELECT count(*) FROM chunks WHERE tenant_id = %s", (tenant,))
+        assert (await cur.fetchone())[0] == 0
+
+
+async def test_policy_and_not_the_where_clause_is_the_boundary(seeded, store):
+    """
+    With tenant A set, asking explicitly for tenant B returns nothing.
+
+    This distinguishes the policy from the application's own ``WHERE tenant_id = %s``.
+    If the filter were doing the work, this query would return B's rows.
+    """
+    import psycopg
+
+    _, emb, tenant = seeded
+    other = f"{tenant}-other"
+    vectors = await emb.embed([CORPUS[0].text], task=EmbedTask.DOCUMENT)
+    await store.upsert(CORPUS[:1], vectors, embedder=emb.name, tenant_id=other)
+    try:
+        async with await psycopg.AsyncConnection.connect(APP_DSN) as conn, conn.cursor() as cur:
+            await cur.execute("SELECT set_config('app.tenant_id', %s, true)", (tenant,))
+            await cur.execute("SELECT count(*) FROM chunks WHERE tenant_id = %s", (other,))
+            assert (await cur.fetchone())[0] == 0
+    finally:
+        import psycopg as _pg
+
+        with _pg.connect(DSN) as c, c.cursor() as cur2:
+            cur2.execute("DELETE FROM chunks WHERE tenant_id = %s", (other,))
+            c.commit()
+
+
+async def test_cross_tenant_write_is_refused(seeded):
+    """
+    WITH CHECK stops a scoped connection writing into another tenant.
+
+    Without it, isolation would be read-only: a caller could not see tenant B but
+    could still insert rows attributed to it.
+    """
+    import psycopg
+
+    _, _, tenant = seeded
+    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+        async with await psycopg.AsyncConnection.connect(APP_DSN) as conn, conn.cursor() as cur:
+            await cur.execute("SELECT set_config('app.tenant_id', %s, true)", (tenant,))
+            await cur.execute(
+                """
+                INSERT INTO chunks (content_hash, tenant_id, source, page, text,
+                                    embedding, embedder)
+                VALUES ('x', %s, 's.pdf', 1, 'x', %s, 'e')
+                """,
+                (f"{tenant}-other", "[" + ",".join(["0.1"] * 768) + "]"),
+            )
+
+
+async def test_store_rejects_an_empty_tenant(store):
+    """
+    An empty tenant must fail loudly rather than being set as an empty GUC.
+
+    ``set_config('app.tenant_id', '', true)`` would compare equal to no real tenant,
+    so the query would silently return nothing -- a wrong answer dressed as an empty
+    result, which is harder to notice than an exception.
+    """
+    with pytest.raises(ValueError, match="non-empty"):
+        await store.count(tenant_id="")
+
+
 # --- storage ---------------------------------------------------------------
 
 
-async def test_ensure_schema_is_idempotent(store):
-    await store.ensure_schema()
-    await store.ensure_schema()  # must not raise on a second application
+async def test_ensure_schema_is_idempotent(admin_store):
+    await admin_store.ensure_schema()
+    await admin_store.ensure_schema()  # must not raise on a second application
 
 
 async def test_bootstrap_works_before_the_extension_exists():
@@ -143,11 +286,14 @@ async def test_upsert_reports_inserts_then_updates(store, tenant):
     emb = HashingEmbedder()
     vectors = await emb.embed([c.text for c in CORPUS], task=EmbedTask.DOCUMENT)
 
-    inserted, updated = await store.upsert(CORPUS, vectors, embedder=emb.name, tenant_id=tenant)
-    assert (inserted, updated) == (len(CORPUS), 0)
+    first = await store.upsert(CORPUS, vectors, embedder=emb.name, tenant_id=tenant)
+    assert (first.inserted, first.updated, first.skipped) == (len(CORPUS), 0, 0)
 
-    inserted, updated = await store.upsert(CORPUS, vectors, embedder=emb.name, tenant_id=tenant)
-    assert (inserted, updated) == (0, len(CORPUS)), "re-ingest must update, not duplicate"
+    second = await store.upsert(CORPUS, vectors, embedder=emb.name, tenant_id=tenant)
+    assert (second.inserted, second.updated) == (0, len(CORPUS)), (
+        "re-ingest must update, not duplicate"
+    )
+    assert second.skipped == 0, "no version information means every write applies"
     assert await store.count(tenant_id=tenant) == len(CORPUS)
 
 
@@ -175,6 +321,54 @@ async def test_count_mismatch_is_rejected(store, tenant):
 
 
 # --- search ----------------------------------------------------------------
+
+
+async def test_lexical_ordering_is_independent_of_insert_order(store, tenant):
+    """
+    Tied lexical scores must be broken deterministically, not by physical row order.
+
+    ``ts_rank_cd`` gives most matches the same score -- on the golden set, 13-14 of any
+    top 20 share one. With only ``ORDER BY rank DESC`` those ties came back in heap
+    order, so the same corpus ingested into two tenants ranked differently in 9 of 10
+    golden cases and the retrieval eval moved with it: recall_normalised read 0.580 or
+    0.560 depending on nothing but where the rows happened to land. The CI baseline had
+    recorded one of those samples as if it were a fixed property.
+
+    This builds the tie deliberately -- identical text on four pages, so identical rank
+    -- and inserts it in opposite orders into two tenants. The orderings must match.
+    """
+    identical = [
+        Chunk(
+            text="Digital trust governance framework applies across member states.",
+            source="tie.pdf",
+            page=page,
+        )
+        for page in (1, 2, 3, 4)
+    ]
+    emb = HashingEmbedder()
+    vectors = await emb.embed([c.text for c in identical], task=EmbedTask.DOCUMENT)
+
+    forward, backward = f"{tenant}-fwd", f"{tenant}-rev"
+    await store.upsert(identical, vectors, embedder=emb.name, tenant_id=forward)
+    await store.upsert(
+        list(reversed(identical)), list(reversed(vectors)), embedder=emb.name, tenant_id=backward
+    )
+    try:
+        a = await store.lexical_search("digital trust governance", top_k=10, tenant_id=forward)
+        b = await store.lexical_search("digital trust governance", top_k=10, tenant_id=backward)
+        assert [c.chunk.page for c in a] == [c.chunk.page for c in b], (
+            "tied lexical results depend on insert order; the ORDER BY needs a "
+            "deterministic tie-break"
+        )
+        # The premise: these really are ties. If ts_rank_cd ever stops tying them the
+        # test would pass for the wrong reason.
+        assert len({round(c.score, 9) for c in a}) == 1, "expected identical scores"
+    finally:
+        import psycopg
+
+        with psycopg.connect(DSN) as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM chunks WHERE tenant_id IN (%s, %s)", (forward, backward))
+            conn.commit()
 
 
 async def test_lexical_search_finds_exact_identifiers(seeded):
@@ -281,6 +475,37 @@ async def test_hybrid_returns_empty_for_an_empty_tenant(store, tenant):
     result = await retriever.retrieve(RetrievalRequest(query="anything", top_k=5))
     assert result.chunks == []
     assert result.total_chars == 0
+
+
+async def test_request_tenant_overrides_the_constructed_one(seeded, store):
+    """
+    The per-request tenant wins over the tenant the retriever was built with.
+
+    One retriever instance serves every request, so per-request tenancy has to travel
+    on the request. If it did not, a multi-tenant deployment would serve whichever
+    tenant happened to be in the process's configuration -- and the RLS policy would
+    enforce that wrong tenant perfectly.
+    """
+    _, emb, tenant = seeded
+    retriever = HybridRetriever(store, emb, config=HybridConfig(), tenant_id=tenant)
+
+    # The retriever's own tenant has the corpus; the requested one is empty.
+    empty = await retriever.retrieve(
+        RetrievalRequest(query="digital trust", top_k=4, tenant_id=f"{tenant}-empty")
+    )
+    assert empty.chunks == [], "the request tenant was ignored in favour of the constructed one"
+
+    # Absent a request tenant, the constructed one is still used.
+    populated = await retriever.retrieve(RetrievalRequest(query="digital trust", top_k=4))
+    assert populated.chunks, "omitting the request tenant must fall back, not return nothing"
+
+
+async def test_coverage_is_reported_per_request_tenant(seeded, store):
+    """Corpus coverage must follow the caller's tenant, not the process configuration."""
+    _, emb, tenant = seeded
+    retriever = HybridRetriever(store, emb, tenant_id=tenant)
+    assert await retriever.corpus_coverage(tenant) != {}
+    assert await retriever.corpus_coverage(f"{tenant}-empty") == {}
 
 
 async def test_hybrid_carries_citations(seeded):

@@ -197,6 +197,9 @@ jobs:
           if-no-files-found: warn
 
   optional-deps:
+    # NOTE: this display name is a required status check in the 'main protection'
+    # ruleset. Renaming it leaves the ruleset waiting on a name nothing reports, and
+    # the pull request blocks as pending forever. Change both together or neither.
     name: prefect stays optional
     runs-on: ubuntu-latest
     timeout-minutes: 8
@@ -212,24 +215,41 @@ jobs:
           enable-cache: true
           cache-dependency-glob: pro-code-production-service-v2/uv.lock
 
-      - name: Install WITHOUT the ingestion extra
+      - name: Install WITHOUT the ingestion or events extras
         run: uv sync --frozen --extra dev
 
-      - name: Assert the service works with no orchestrator installed
-        # The claim is that Prefect is optional and the API image need not carry it.
-        # A comment asserting that is worth nothing; this proves it.
+      - name: Assert the service works with no orchestrator and no broker client
+        # The claim is that Prefect and the Pub/Sub client are optional, and that the
+        # API image need not carry either. A comment asserting that is worth nothing;
+        # this proves it.
         run: |
           uv run python -c "
           import importlib.util, sys
-          if importlib.util.find_spec('prefect') is not None:
-              sys.exit('::error::prefect is installed; this job must run without it')
+          for module in ('prefect', 'google.pubsub_v1'):
+              if importlib.util.find_spec(module) is not None:
+                  sys.exit(f'::error::{module} is installed; this job must run without it')
 
           from digital_economy_agent.api.app import create_app
           from digital_economy_agent.ingestion import ingest_pages, PatternRedactor
           from digital_economy_agent.ingestion.flow import PREFECT_AVAILABLE, ingest_corpus_flow
           assert PREFECT_AVAILABLE is False, 'flow.py should report prefect missing'
           assert callable(ingest_corpus_flow), 'flow must stay callable via the shims'
-          print('service and ingestion pipeline import cleanly without prefect')
+
+          # The consumer and its handler must be usable with no broker client at all:
+          # they are tested against the in-memory broker, and the Pub/Sub adapter is
+          # one implementation of the protocol rather than a dependency of it.
+          from digital_economy_agent.messaging import MessageConsumer, InMemorySubscriber
+          from digital_economy_agent.messaging import DocumentIngestionHandler
+
+          # Importing the adapter must not require the client either -- only calling it.
+          from digital_economy_agent.messaging import pubsub
+          try:
+              pubsub._clients()
+          except ImportError as exc:
+              assert 'uv sync --extra events' in str(exc), f'unhelpful error: {exc}'
+          else:
+              sys.exit('::error::pubsub._clients() succeeded without google-cloud-pubsub')
+          print('service, ingestion and consumer import cleanly without either extra')
           "
 
       - name: Run the suite that does not need an orchestrator
@@ -256,8 +276,24 @@ jobs:
           --health-retries 12
 
     env:
-      DSN: postgresql://postgres:devpass@localhost:5432/agent
-      AGENT_POSTGRES_DSN: postgresql://postgres:devpass@localhost:5432/agent
+      # Passed to the ingest CLI with --dsn, so ingestion writes as the app role and
+      # the *write* path is subject to the policy too. Bootstrap inside the CLI uses
+      # AGENT_POSTGRES_ADMIN_DSN below, which is what creates this role in the first
+      # place -- the store connects lazily, so the role exists by the time it is used.
+      DSN: postgresql://agent_app:apppass@localhost:5432/agent
+      # The service reads as the least-privilege role, so the row-level-security
+      # policy actually applies to it -- a superuser would bypass the policy and
+      # /readyz would report isolation unenforced, which now fails readiness.
+      # Bootstrap (DDL, role creation) needs ownership, hence the separate admin DSN.
+      AGENT_POSTGRES_DSN: postgresql://agent_app:apppass@localhost:5432/agent
+      AGENT_POSTGRES_ADMIN_DSN: postgresql://postgres:devpass@localhost:5432/agent
+      AGENT_POSTGRES_APP_ROLE: agent_app
+      AGENT_POSTGRES_APP_PASSWORD: apppass
+      # No identity provider here, so the eval harness sends no credential. Opting in
+      # explicitly, exactly as it opts in to the hashing embedder below: a missing
+      # credential must not quietly become an accepted configuration, and without this
+      # /readyz degrades and the harness cannot reach a tenant-scoped route at all.
+      AGENT_ALLOW_ANONYMOUS_TENANT: "true"
       AGENT_GROQ_API_KEY: not-needed-for-retrieval-only
       AGENT_USE_IN_MEMORY_RETRIEVER: "false"
       # Explicit opt-in to the deterministic embedder. This is what makes the eval a
@@ -516,6 +552,42 @@ jobs:
           grep -q 'kind: ServiceMonitor' /tmp/full.yaml \
             || { echo "::error::ServiceMonitor missing when enabled"; exit 1; }
 
+          # The consumer is a second workload, off by default.
+          ! grep -q 'name: rel-digital-economy-agent-consumer' /tmp/default.yaml \
+            || { echo "::error::consumer rendered while disabled"; exit 1; }
+          # Enabling it without a subscription must fail the render rather than deploy
+          # a pod that goes ready and consumes nothing.
+          if render --set consumer.enabled=true > /tmp/nosub.yaml 2>&1; then
+            echo "::error::consumer rendered with no subscription configured"; exit 1
+          fi
+          render --set consumer.enabled=true \
+                 --set consumer.subscription=projects/p/subscriptions/docs \
+                 --set consumer.deadLetterTopic=projects/p/topics/docs-dlq \
+                 > /tmp/consumer.yaml
+          grep -q 'name: rel-digital-economy-agent-consumer' /tmp/consumer.yaml \
+            || { echo "::error::consumer Deployment missing when enabled"; exit 1; }
+
+          # The API Service must not select consumer pods. Both workloads share a
+          # release, and before component labels the base selector matched every pod --
+          # so the API Service would have routed HTTP to a process serving only probes,
+          # on a different port. A grep cannot see this; the label sets have to be
+          # compared.
+          python3 - <<'SELECTORS'
+          import sys, yaml
+          docs = [d for d in yaml.safe_load_all(open("/tmp/consumer.yaml")) if d]
+          svc = next(d for d in docs
+                     if d["kind"] == "Service" and not d["metadata"]["name"].endswith("consumer"))
+          pods = {d["metadata"]["name"].endswith("consumer"):
+                  d["spec"]["template"]["metadata"]["labels"]
+                  for d in docs if d["kind"] == "Deployment"}
+          sel = svc["spec"]["selector"]
+          if all(pods[True].get(k) == v for k, v in sel.items()):
+              sys.exit("::error::the API Service selects consumer pods")
+          if not all(pods[False].get(k) == v for k, v in sel.items()):
+              sys.exit("::error::the API Service no longer selects its own pods")
+          print("service selectors are disjoint")
+          SELECTORS
+
       - name: Validate rendered manifests against the Kubernetes schema
         # helm lint checks templating, not whether the result is a valid object. This
         # catches a mistyped field that renders cleanly and is rejected by the API server.
@@ -529,7 +601,7 @@ jobs:
           set -e
           docker run --rm -v /tmp:/tmp ghcr.io/yannh/kubeconform:v0.6.7 \
             -summary -strict -kubernetes-version 1.30.0 \
-            /tmp/default.yaml /tmp/fixed.yaml /tmp/digest.yaml
+            /tmp/default.yaml /tmp/fixed.yaml /tmp/digest.yaml /tmp/consumer.yaml
 
           docker run --rm -v /tmp:/tmp ghcr.io/yannh/kubeconform:v0.6.7 \
             -summary -strict -kubernetes-version 1.30.0 -ignore-missing-schemas \
@@ -630,6 +702,12 @@ jobs:
           [ "$ready" = "503" ] || { echo "::error::readiness should be 503 with no database, got $ready"; exit 1; }
           echo "$body" | grep -q '"durable_checkpointer":false' \
             || { echo "::error::readyz did not name the failing check"; exit 1; }
+          # This container was started without AGENT_ALLOW_ANONYMOUS_TENANT and without
+          # a signing secret, so it cannot establish who is asking. The image must ship
+          # fail-closed: serving the configured tenant to any caller who finds the URL
+          # is the failure this asserts against.
+          echo "$body" | grep -q '"tenant_resolution":false' \
+            || { echo "::error::image did not fail closed on tenant resolution"; exit 1; }
           docker rm -f agent-degraded
 
       - name: Smoke test the image — ready with a database
@@ -640,6 +718,7 @@ jobs:
           docker run -d --name agent-ready --network host \
             -e AGENT_GROQ_API_KEY=ci-dummy \
             -e AGENT_POSTGRES_DSN=postgresql://postgres:devpass@localhost:5432/agent \
+            -e AGENT_ALLOW_ANONYMOUS_TENANT=true \
             digital-economy-agent:${{ github.sha }}
           for i in $(seq 1 45); do
             code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/readyz || echo 000)

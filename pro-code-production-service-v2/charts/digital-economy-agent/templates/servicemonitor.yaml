@@ -8,7 +8,7 @@ metadata:
   labels: {{- include "agent.labels" . | nindent 4 }}
 spec:
   selector:
-    matchLabels: {{- include "agent.selectorLabels" . | nindent 6 }}
+    matchLabels: {{- include "agent.apiSelectorLabels" . | nindent 6 }}
   endpoints:
     - port: http
       path: /metrics

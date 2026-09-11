@@ -93,11 +93,68 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("AGENT_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"),
     )
     tenant_id: str = "default"
+
+    # --- tenancy and least privilege -------------------------------------------
+    # The service queries as a non-superuser role so the row-level-security policy on
+    # `chunks` actually applies: superusers ignore policies, and FORCE ROW LEVEL
+    # SECURITY only subjects the table owner. DDL needs ownership, so bootstrap uses a
+    # separate administrative DSN. Empty falls back to `postgres_dsn`, which keeps a
+    # single-DSN local setup working -- at the cost of RLS being inert there, which
+    # `/readyz` now reports rather than leaving it to be discovered.
+    postgres_admin_dsn: str = ""
+    # When set, bootstrap creates and grants this role. Left empty in production, where
+    # the role and its password are managed by Terraform.
+    postgres_app_role: str = ""
+    postgres_app_password: SecretStr = SecretStr("")
+
+    # --- authentication --------------------------------------------------------
+    # The tenant a request may touch comes from a verified token claim, never from a
+    # header or body: RLS enforces faithfully against whatever identifier it is given,
+    # so an attacker-supplied one is enforced just as faithfully.
+    jwt_secret: SecretStr = Field(
+        default=SecretStr(""),
+        description="Shared secret for HS* bearer tokens. Empty disables enforcement.",
+    )
+    jwt_algorithm: str = "HS256"
+    jwt_audience: str = ""
+    jwt_issuer: str = ""
+    jwt_tenant_claim: str = "tenant_id"
+    # Opt in to serving the configured `tenant_id` with no credential at all. This is
+    # the local-development and CI shape. Default False for the same reason
+    # `allow_hashing_embedder` is: a missing credential must not quietly become an
+    # accepted configuration, and `/readyz` reports the difference.
+    allow_anonymous_tenant: bool = False
+
+    # --- event-driven ingestion ------------------------------------------------
+    # Full resource name, e.g. projects/<p>/subscriptions/<s>. Empty means the
+    # consumer has nothing to attach to and refuses to start, rather than idling in a
+    # ready-looking pod that consumes nothing.
+    pubsub_subscription: str = ""
+    # Where a message that exhausted its retries is sent. Empty is permitted but
+    # reported: without a sink the consumer nacks forever rather than dropping the
+    # payload, so a poison message becomes an endlessly redelivered one.
+    pubsub_dead_letter_topic: str = ""
+    consumer_max_delivery_attempts: int = Field(default=5, ge=1, le=100)
+    # Bounded because the embedding provider rate-limits. Letting the broker set the
+    # fan-out turns a backlog into a wall of 429s, which the gateway backs off on,
+    # which makes the backlog worse.
+    consumer_concurrency: int = Field(default=4, ge=1, le=64)
+    consumer_max_messages: int = Field(default=10, ge=1, le=1000)
+    consumer_poll_interval_seconds: float = Field(default=1.0, gt=0, le=60)
+    # The consumer serves /healthz, /readyz and /metrics on this port. Without it a
+    # Kubernetes Deployment has no probe target and Prometheus has nothing to scrape,
+    # so a stalled consumer would be indistinguishable from an idle one.
+    consumer_port: int = Field(default=8081, ge=1, le=65535)
     # Opting in to the deterministic embedder is a configuration decision, not a
     # degradation: it is how retrieval is evaluated in CI without an API key. Left
     # false, a missing embedding credential correctly reports the service as degraded,
     # so an operator who *meant* to have embeddings still gets a signal.
     allow_hashing_embedder: bool = False
+
+    @property
+    def admin_dsn(self) -> str:
+        """DSN for DDL and role management; the app DSN when none is configured."""
+        return self.postgres_admin_dsn or self.postgres_dsn
 
     # --- hybrid search ---------------------------------------------------------
     retrieval_candidate_multiplier: int = Field(default=4, ge=1, le=20)

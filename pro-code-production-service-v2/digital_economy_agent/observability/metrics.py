@@ -113,6 +113,41 @@ REVIEW_DECISIONS = Counter(
     registry=REGISTRY,
 )
 
+# --- event consumer -------------------------------------------------------
+# Labelled by outcome rather than split into separate counters so a dashboard can show
+# the ratio directly; the label set is closed and tiny, so cardinality stays bounded.
+CONSUMER_MESSAGES = Counter(
+    "agent_consumer_messages_total",
+    "Messages the ingestion consumer finished with, by outcome "
+    "(processed, retried, dead_lettered).",
+    ["outcome"],
+    registry=REGISTRY,
+)
+
+CONSUMER_DURATION = Histogram(
+    "agent_consumer_message_duration_seconds",
+    "Wall time to handle one message, including the database write.",
+    buckets=(0.05, 0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300),
+    registry=REGISTRY,
+)
+
+# The metric to alert on. Throughput looks healthy right up until the consumer cannot
+# keep up, and only the age of the oldest unacknowledged message reveals that. -1 means
+# the broker does not report it, which is distinguishable from a genuine zero.
+CONSUMER_BACKLOG_AGE = Gauge(
+    "agent_consumer_oldest_unacked_seconds",
+    "Age of the oldest unacknowledged message. -1 when the broker does not report it.",
+    registry=REGISTRY,
+)
+
+# A gauge, not a counter: what matters operationally is whether the dead-letter queue
+# is currently non-empty, and a counter of all-time failures never returns to zero.
+CONSUMER_DEAD_LETTERED = Gauge(
+    "agent_consumer_dead_lettered",
+    "Messages this process has sent to the dead-letter sink since start.",
+    registry=REGISTRY,
+)
+
 REVISION_BUDGET_EXHAUSTED = Counter(
     "agent_revision_budget_exhausted_total",
     "Runs halted because the revision budget ran out.",

@@ -16,10 +16,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from ..retrieval.chunking import ChunkingConfig, chunk_pages
-from ..retrieval.store import PgVectorStore
+from ..retrieval.store import PgVectorStore, content_hash
 from ..retrieval.types import Embedder, EmbedTask
 from ..tools.types import Chunk
 from .redaction import PatternRedactor, RedactionReport, Redactor
@@ -41,6 +42,11 @@ class IngestionResult:
     chunks: int = 0
     inserted: int = 0
     updated: int = 0
+    # Chunks whose text was already stored by this embedder, so no embedding was
+    # requested for them at all.
+    unchanged: int = 0
+    # Chunks the store declined to overwrite because what it held was newer.
+    stale: int = 0
     redactions: RedactionReport = field(default_factory=RedactionReport)
     embedder: str = ""
     chunking: dict[str, int] = field(default_factory=dict)
@@ -50,6 +56,11 @@ class IngestionResult:
     def idempotent_rerun(self) -> bool:
         """True when the run changed nothing new -- the signal ingestion is repeatable."""
         return self.chunks > 0 and self.inserted == 0
+
+    @property
+    def embedded(self) -> int:
+        """How many chunks were actually sent to the embedding provider."""
+        return self.chunks - self.unchanged
 
 
 def read_pdf_pages(path: Path, *, max_pages: int | None = None) -> list[tuple[int, str]]:
@@ -80,6 +91,7 @@ async def ingest_pages(
     redactor: Redactor | None = None,
     chunking: ChunkingConfig | None = None,
     tenant_id: str = "default",
+    source_updated_at: datetime | None = None,
 ) -> IngestionResult:
     """
     Run the pipeline over already-extracted pages.
@@ -113,24 +125,55 @@ async def ingest_pages(
         logger.warning("no chunks produced for %s; nothing to upsert", source)
         return result
 
+    # Hash before embedding, not after. Content hashing already made the *storage*
+    # idempotent, but the hash was computed at insert time -- so a redelivered document
+    # embedded every chunk first and then upserted to no effect. Under at-least-once
+    # delivery that is a recurring bill and a recurring draw on the provider's quota.
+    hashes = [content_hash(c.source, c.page, c.text) for c in chunks]
+    already = await store.existing_hashes(hashes, tenant_id=tenant_id, embedder=embedder.name)
+    pending = [chunk for chunk, digest in zip(chunks, hashes, strict=True) if digest not in already]
+    result.unchanged = len(chunks) - len(pending)
+
+    if not pending:
+        logger.info(
+            "%s: all %d chunks already stored by %s; nothing embedded",
+            source,
+            len(chunks),
+            embedder.name,
+        )
+        return result
+
     embeddings: list[list[float]] = []
-    for start in range(0, len(chunks), EMBED_BATCH_SIZE):
-        batch = chunks[start : start + EMBED_BATCH_SIZE]
+    for start in range(0, len(pending), EMBED_BATCH_SIZE):
+        batch = pending[start : start + EMBED_BATCH_SIZE]
         embeddings.extend(await embedder.embed([c.text for c in batch], task=EmbedTask.DOCUMENT))
         logger.info(
-            "embedded %d/%d chunks of %s", min(start + len(batch), len(chunks)), len(chunks), source
+            "embedded %d/%d chunks of %s",
+            min(start + len(batch), len(pending)),
+            len(pending),
+            source,
         )
 
-    inserted, updated = await store.upsert(
-        chunks, embeddings, embedder=embedder.name, tenant_id=tenant_id
+    outcome = await store.upsert(
+        pending,
+        embeddings,
+        embedder=embedder.name,
+        tenant_id=tenant_id,
+        source_updated_at=source_updated_at,
     )
-    result.inserted, result.updated = inserted, updated
+    result.inserted, result.updated, result.stale = (
+        outcome.inserted,
+        outcome.updated,
+        outcome.skipped,
+    )
     logger.info(
-        "ingested %s: %d chunks (%d new, %d updated), %d redactions",
+        "ingested %s: %d chunks (%d new, %d updated, %d unchanged, %d stale), %d redactions",
         source,
         len(chunks),
-        inserted,
-        updated,
+        outcome.inserted,
+        outcome.updated,
+        result.unchanged,
+        outcome.skipped,
         result.redactions.total,
     )
     return result

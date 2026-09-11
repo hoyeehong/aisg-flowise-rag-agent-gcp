@@ -31,6 +31,7 @@ from ..retrieval import (
     PgVectorStore,
 )
 from ..tools import Chunk, InMemoryRetriever, RetrievalRequest, Retriever
+from .auth import Principal, TenantResolver
 from .schemas import (
     CorpusCoverage,
     CreateReportRequest,
@@ -157,6 +158,22 @@ def get_service(request: Request) -> ReportService:
 ServiceDep = Annotated[ReportService, Depends(get_service)]
 
 
+def get_principal(request: Request) -> Principal:
+    """
+    Resolve the caller and the tenant they may touch.
+
+    Kept at module scope alongside ServiceDep: a dependency annotation defined inside
+    create_app is unresolvable under `from __future__ import annotations`, and FastAPI
+    then silently reinterprets the parameter as a query string one. That produced a 422
+    on every request in Phase 1 and is not obvious from the traceback.
+    """
+    resolver: TenantResolver = request.app.state.tenants
+    return resolver.resolve(request.headers.get("Authorization"))
+
+
+PrincipalDep = Annotated[Principal, Depends(get_principal)]
+
+
 def create_app(
     settings: Settings | None = None,
     *,
@@ -211,10 +228,39 @@ def create_app(
                 "restart. Set it to make the review gate durable."
             )
 
+        # Constructed before anything serves traffic so an unsupported algorithm is a
+        # startup failure, not a per-request surprise.
+        app.state.tenants = TenantResolver(resolved)
+
+        app.state.isolation = None
         if isinstance(app.state.retriever, HybridRetriever):
-            await PgVectorStore(
+            # DDL and role management need ownership, which the query role deliberately
+            # lacks -- so bootstrap runs on the administrative DSN, which falls back to
+            # the app DSN when none is configured.
+            admin = PgVectorStore(resolved.admin_dsn, dimensions=resolved.embedding_dimensions)
+            await admin.ensure_schema()
+            if resolved.postgres_app_role:
+                await admin.ensure_app_role(
+                    resolved.postgres_app_role,
+                    password=resolved.postgres_app_password.get_secret_value() or None,
+                )
+            # Measured once at startup rather than per probe: whether the policy is in
+            # force is a property of the connection and the schema, neither of which
+            # changes while the process runs. Reported by /readyz, because the first
+            # version of this policy was enabled, forced and completely inert.
+            app.state.isolation = await PgVectorStore(
                 resolved.postgres_dsn, dimensions=resolved.embedding_dimensions
-            ).ensure_schema()
+            ).isolation_status()
+            if not app.state.isolation["enforced"]:
+                logger.warning(
+                    "tenant isolation is NOT enforced on this connection (role=%s "
+                    "superuser=%s bypassrls=%s unscoped_rows=%s); the RLS policy exists "
+                    "but does not apply",
+                    app.state.isolation.get("role"),
+                    app.state.isolation.get("is_superuser"),
+                    app.state.isolation.get("bypasses_rls"),
+                    app.state.isolation.get("unscoped_visible_rows"),
+                )
 
         app.state.graph = build_graph(
             app.state.gateway, app.state.retriever, checkpointer=checkpointer
@@ -299,6 +345,14 @@ def create_app(
             checks["postgres_configured"] = cfg.postgres_configured
         if cfg.use_postgres_checkpointer:
             checks["durable_checkpointer"] = request.app.state.checkpoint_backend == "postgres"
+        # Either a verified credential supplies the tenant, or single-tenant operation
+        # was opted into explicitly. Neither means the service cannot say who is asking.
+        checks["tenant_resolution"] = request.app.state.tenants.usable
+        isolation = request.app.state.isolation
+        if isolation is not None:
+            # Reports measured enforcement, not configuration. A policy that is present
+            # and forced but bypassed by a superuser connection reports False here.
+            checks["tenant_isolation"] = bool(isolation["enforced"])
         ok = all(checks.values())
         if not ok:
             response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
@@ -327,7 +381,9 @@ def create_app(
         return Response(content=obs_metrics.render(), media_type=obs_metrics.CONTENT_TYPE)
 
     @app.post("/v1/retrieve", response_model=RetrieveResponse, tags=["retrieval"])
-    async def retrieve(body: RetrieveRequest, request: Request) -> RetrieveResponse:
+    async def retrieve(
+        body: RetrieveRequest, request: Request, principal: PrincipalDep
+    ) -> RetrieveResponse:
         """
         Retrieval only: no chat model is invoked.
 
@@ -336,7 +392,9 @@ def create_app(
         checked on every pull request without an API key or quota.
         """
         retriever: Retriever = request.app.state.retriever
-        result = await retriever.retrieve(RetrievalRequest(query=body.query, top_k=body.top_k))
+        result = await retriever.retrieve(
+            RetrievalRequest(query=body.query, top_k=body.top_k, tenant_id=principal.tenant_id)
+        )
         describe = getattr(retriever, "describe", None)
         return RetrieveResponse(
             query=body.query,
@@ -348,19 +406,20 @@ def create_app(
         )
 
     @app.get("/v1/corpus", response_model=CorpusCoverage, tags=["ops"])
-    async def corpus(request: Request) -> CorpusCoverage:
+    async def corpus(request: Request, principal: PrincipalDep) -> CorpusCoverage:
         """
         Report the indexed pages for the active tenant.
 
         Read-only metadata (page numbers, not content), so it is safe to expose
         alongside the other ops endpoints.
         """
-        cfg: Settings = request.app.state.settings
         retriever = request.app.state.retriever
         reporter = getattr(retriever, "corpus_coverage", None)
-        sources: dict[str, list[int]] = await reporter() if callable(reporter) else {}
+        sources: dict[str, list[int]] = (
+            await reporter(principal.tenant_id) if callable(reporter) else {}
+        )
         return CorpusCoverage(
-            tenant_id=cfg.tenant_id,
+            tenant_id=principal.tenant_id,
             sources=sources,
             total_pages=sum(len(pages) for pages in sources.values()),
         )
@@ -371,7 +430,9 @@ def create_app(
         status_code=status.HTTP_202_ACCEPTED,
         tags=["reports"],
     )
-    async def create_report(body: CreateReportRequest, service: ServiceDep) -> ReportState:
+    async def create_report(
+        body: CreateReportRequest, service: ServiceDep, principal: PrincipalDep
+    ) -> ReportState:
         """
         Start a run. Returns 202 because the run pauses at the human review gate
         rather than completing: the response carries a draft awaiting a verdict.
@@ -380,25 +441,30 @@ def create_app(
         return await service.start(
             thread_id,
             body.question,
+            tenant_id=principal.tenant_id,
             top_k=body.top_k,
             max_revisions=body.max_revisions,
             include_context=body.include_context,
         )
 
     @app.get("/v1/reports/{thread_id}", response_model=ReportState, tags=["reports"])
-    async def get_report(thread_id: str, service: ServiceDep) -> ReportState:
+    async def get_report(
+        thread_id: str, service: ServiceDep, principal: PrincipalDep
+    ) -> ReportState:
         try:
-            return await service.get(thread_id)
+            return await service.get(thread_id, tenant_id=principal.tenant_id)
         except RunNotFoundError as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"no run {thread_id}") from exc
 
     @app.post("/v1/reports/{thread_id}/review", response_model=ReportState, tags=["reports"])
     async def review_report(
-        thread_id: str, body: ReviewRequest, service: ServiceDep
+        thread_id: str, body: ReviewRequest, service: ServiceDep, principal: PrincipalDep
     ) -> ReportState:
         """Approve the draft, or request a revision with feedback."""
         try:
-            return await service.review(thread_id, body.action, body.feedback)
+            return await service.review(
+                thread_id, body.action, body.feedback, tenant_id=principal.tenant_id
+            )
         except RunNotFoundError as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"no run {thread_id}") from exc
         except RunNotAwaitingReviewError as exc:
@@ -453,7 +519,7 @@ def create_app(
 
     @app.post("/v1/reports/stream", tags=["reports"])
     async def create_report_streaming(
-        body: CreateReportRequest, request: Request
+        body: CreateReportRequest, request: Request, principal: PrincipalDep
     ) -> StreamingResponse:
         """
         Start a run, streaming node completions as server-sent events.
@@ -476,6 +542,7 @@ def create_app(
                 async for update in graph.astream(
                     {
                         "question": body.question,
+                        "tenant_id": principal.tenant_id,
                         "top_k": body.top_k or settings.default_top_k,
                         "max_revisions": (
                             settings.max_revisions
@@ -488,7 +555,10 @@ def create_app(
                 ):
                     for node in update:
                         yield sse("node", {"node": node})
-                yield sse("state", (await service.get(thread_id)).model_dump())
+                yield sse(
+                    "state",
+                    (await service.get(thread_id, tenant_id=principal.tenant_id)).model_dump(),
+                )
             except Exception as exc:  # surface failures in-band; the response is already 200
                 logger.exception("streaming run %s failed", thread_id)
                 yield sse("error", {"error": type(exc).__name__, "detail": str(exc)})

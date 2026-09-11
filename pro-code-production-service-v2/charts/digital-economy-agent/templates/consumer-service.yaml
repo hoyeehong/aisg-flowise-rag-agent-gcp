@@ -1,0 +1,31 @@
+{{- if and .Values.consumer.enabled .Values.observability.serviceMonitor.enabled }}
+# Headless, and only so the ServiceMonitor has something to select. The consumer takes
+# no inbound traffic; its port exists for probes and scraping.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "agent.fullname" . }}-consumer
+  labels: {{- include "agent.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  ports:
+    - port: {{ .Values.consumer.port }}
+      targetPort: metrics
+      protocol: TCP
+      name: metrics
+  selector: {{- include "agent.consumerSelectorLabels" . | nindent 4 }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "agent.fullname" . }}-consumer
+  labels: {{- include "agent.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels: {{- include "agent.consumerSelectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.observability.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.observability.serviceMonitor.scrapeTimeout }}
+{{- end }}

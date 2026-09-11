@@ -110,6 +110,15 @@ existingSecret:
     groqApiKey: GROQ_API_KEY
     geminiApiKey: GEMINI_API_KEY
     postgresDsn: AGENT_POSTGRES_DSN
+    # Ownership-carrying DSN, used only to apply the schema and the row-level-security
+    # policy at startup. The query DSN above is a NOSUPERUSER role that deliberately
+    # cannot run DDL, so without this the first deploy fails on CREATE TABLE.
+    #
+    # Set to "" to fall back to the query DSN, which only works where that role owns
+    # the table -- and where it does, RLS does not apply to it, which /readyz reports.
+    # Applying migrations from every starting pod is a simplification; a Job that runs
+    # once per release is the better shape and is noted in the README.
+    postgresAdminDsn: AGENT_POSTGRES_ADMIN_DSN
 
 observability:
   otlpEndpoint: ""            # empty disables tracing
@@ -117,6 +126,38 @@ observability:
     enabled: false            # requires the Prometheus Operator CRDs
     interval: 30s
     scrapeTimeout: 10s
+
+# Event-driven ingestion. A separate workload from the API: they scale on different
+# signals, and a burst of ingestion must not slow report generation.
+consumer:
+  enabled: false          # opt in; requires a Pub/Sub subscription to exist
+  replicaCount: 1
+  # Full resource names, e.g. projects/<project>/subscriptions/<name>. Required when
+  # enabled -- the chart fails to render rather than deploying a pod with nothing to
+  # attach to, which would go ready and consume nothing.
+  subscription: ""
+  # Without a dead-letter topic Pub/Sub omits `delivery_attempt`, so the consumer's
+  # retry ceiling never fires and a poison message is redelivered forever. Terraform
+  # creates both together for this reason.
+  deadLetterTopic: ""
+  concurrency: 4
+  maxDeliveryAttempts: 5
+  port: 8081
+  # Generous, so an in-flight batch can finish and acknowledge on SIGTERM rather than
+  # being killed and redelivered.
+  terminationGracePeriodSeconds: 60
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  # Deliberately no HPA. The signal that matters is subscription backlog, not CPU: a
+  # consumer waiting on the embedding provider is idle by CPU and behind by backlog, so
+  # a CPU-based HPA would scale down exactly when it should scale up. Backlog-based
+  # autoscaling needs KEDA or a custom metrics adapter; until one is in the cluster,
+  # replicaCount is set by hand and is honest about being fixed.
 
 nodeSelector: {}
 tolerations: []

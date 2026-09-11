@@ -71,3 +71,16 @@ variable "labels" {
     managed-by  = "terraform"
   }
 }
+
+variable "consumer_max_delivery_attempts" {
+  type        = number
+  description = "Deliveries before a message is dead-lettered. Must match AGENT_CONSUMER_MAX_DELIVERY_ATTEMPTS, or one ceiling fires before the other."
+  default     = 5
+
+  validation {
+    # Pub/Sub rejects anything outside this range, with an error at apply time rather
+    # than plan time.
+    condition     = var.consumer_max_delivery_attempts >= 5 && var.consumer_max_delivery_attempts <= 100
+    error_message = "Pub/Sub requires max_delivery_attempts between 5 and 100."
+  }
+}

@@ -92,6 +92,7 @@ class ReportService:
         thread_id: str,
         question: str,
         *,
+        tenant_id: str,
         top_k: int | None = None,
         max_revisions: int | None = None,
         include_context: bool = False,
@@ -100,17 +101,20 @@ class ReportService:
         await self._graph.ainvoke(
             {
                 "question": question,
+                "tenant_id": tenant_id,
                 "top_k": top_k or self._default_top_k,
                 "max_revisions": self._max_revisions if max_revisions is None else max_revisions,
             },
             config=self._config(thread_id),
         )
-        return await self.get(thread_id, include_context=include_context)
+        return await self.get(thread_id, tenant_id=tenant_id, include_context=include_context)
 
-    async def review(self, thread_id: str, action: ReviewAction, feedback: str) -> ReportState:
+    async def review(
+        self, thread_id: str, action: ReviewAction, feedback: str, *, tenant_id: str
+    ) -> ReportState:
         """Resume a paused run with a human verdict."""
         snapshot = await self._graph.aget_state(self._config(thread_id))
-        if not snapshot.created_at:
+        if not snapshot.created_at or not self._owns(snapshot.values, tenant_id):
             raise RunNotFoundError(thread_id)
         if not snapshot.next:
             raise RunNotAwaitingReviewError(
@@ -123,9 +127,27 @@ class ReportService:
         await self._graph.ainvoke(
             Command(resume=decision.model_dump()), config=self._config(thread_id)
         )
-        return await self.get(thread_id)
+        return await self.get(thread_id, tenant_id=tenant_id)
 
-    async def get(self, thread_id: str, *, include_context: bool = False) -> ReportState:
+    @staticmethod
+    def _owns(values: dict[str, Any], tenant_id: str) -> bool:
+        """
+        Whether ``tenant_id`` may see this run.
+
+        Application-level, not database-enforced: the LangGraph checkpoint tables
+        have no tenant column, so the RLS policy protecting `chunks` does not cover
+        conversation state. A run recorded before this check existed has no
+        ``tenant_id`` and is treated as belonging to whoever asks, because failing
+        closed on historical rows would make already-stored reports unreachable.
+        Both facts are limitations, and both are documented in the README rather
+        than implied to be solved.
+        """
+        recorded = values.get("tenant_id", "")
+        return not recorded or recorded == tenant_id
+
+    async def get(
+        self, thread_id: str, *, tenant_id: str, include_context: bool = False
+    ) -> ReportState:
         """
         Current state of a run.
 
@@ -136,7 +158,9 @@ class ReportService:
         reached a release.
         """
         snapshot = await self._graph.aget_state(self._config(thread_id))
-        if not snapshot.created_at:
+        # 404 rather than 403 on a tenant mismatch: a caller who may not see a run must
+        # not learn that it exists.
+        if not snapshot.created_at or not self._owns(snapshot.values, tenant_id):
             raise RunNotFoundError(thread_id)
         return self._project(
             thread_id,

@@ -27,6 +27,10 @@ from ..conftest import FakeProvider
 DSN = os.getenv("TEST_POSTGRES_DSN", "postgresql://postgres:devpass@localhost:55432/agent")
 
 
+# Runs are owned by a tenant, and reads verify ownership.
+TENANT = "durability-test"
+
+
 def _postgres_available() -> bool:
     try:
         import psycopg
@@ -68,12 +72,14 @@ async def test_state_reads_work_against_the_async_saver(retriever, no_sleep):
     service, cm = await _service(retriever, no_sleep)
     try:
         thread_id = f"dur-{uuid.uuid4().hex[:12]}"
-        state = await service.start(thread_id, "Summarise digital trust in the region")
+        state = await service.start(
+            thread_id, "Summarise digital trust in the region", tenant_id=TENANT
+        )
         assert state.status == "awaiting_review"
         assert state.draft
 
         # The call that used to raise.
-        again = await service.get(thread_id)
+        again = await service.get(thread_id, tenant_id=TENANT)
         assert again.thread_id == thread_id
         assert again.status == "awaiting_review"
         assert again.draft == state.draft
@@ -92,18 +98,20 @@ async def test_paused_run_survives_a_new_service_instance(retriever, no_sleep):
     first, cm1 = await _service(retriever, no_sleep)
     try:
         thread_id = f"dur-{uuid.uuid4().hex[:12]}"
-        created = await first.start(thread_id, "Summarise digital trust in the region")
+        created = await first.start(
+            thread_id, "Summarise digital trust in the region", tenant_id=TENANT
+        )
     finally:
         await cm1.__aexit__(None, None, None)
 
     second, cm2 = await _service(retriever, no_sleep)
     try:
-        recovered = await second.get(thread_id)
+        recovered = await second.get(thread_id, tenant_id=TENANT)
         assert recovered.status == "awaiting_review"
         assert recovered.draft == created.draft
 
         # And a reviewer can still act on it after the "restart".
-        final = await second.review(thread_id, "approve", "")
+        final = await second.review(thread_id, "approve", "", tenant_id=TENANT)
         assert final.status == "completed"
         assert final.final_report == created.draft
     finally:
@@ -115,14 +123,14 @@ async def test_revision_history_survives_too(retriever, no_sleep):
     first, cm1 = await _service(retriever, no_sleep)
     try:
         thread_id = f"dur-{uuid.uuid4().hex[:12]}"
-        await first.start(thread_id, "Summarise digital talent gaps")
-        await first.review(thread_id, "revise", "Add Vietnam specifics.")
+        await first.start(thread_id, "Summarise digital talent gaps", tenant_id=TENANT)
+        await first.review(thread_id, "revise", "Add Vietnam specifics.", tenant_id=TENANT)
     finally:
         await cm1.__aexit__(None, None, None)
 
     second, cm2 = await _service(retriever, no_sleep)
     try:
-        state = await second.get(thread_id)
+        state = await second.get(thread_id, tenant_id=TENANT)
         assert state.revisions_used == 1
         assert state.feedback_history == ["Add Vietnam specifics."]
     finally:
@@ -134,6 +142,6 @@ async def test_unknown_thread_still_raises_not_found(retriever, no_sleep):
     service, cm = await _service(retriever, no_sleep)
     try:
         with pytest.raises(RunNotFoundError):
-            await service.get(f"absent-{uuid.uuid4().hex[:12]}")
+            await service.get(f"absent-{uuid.uuid4().hex[:12]}", tenant_id=TENANT)
     finally:
         await cm.__aexit__(None, None, None)

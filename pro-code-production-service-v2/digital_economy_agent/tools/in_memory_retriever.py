@@ -60,8 +60,16 @@ class InMemoryRetriever:
     def describe() -> str:
         return "in-memory token-overlap retriever (development only; not a vector search)"
 
-    async def corpus_coverage(self) -> dict[str, list[int]]:
-        """Indexed pages per source, for evaluation preconditions."""
+    async def corpus_coverage(self, tenant_id: str = "") -> dict[str, list[int]]:
+        """
+        Indexed pages per source, for evaluation preconditions.
+
+        ``tenant_id`` is accepted and ignored: this retriever holds a single in-process
+        corpus and has no tenancy at all. Matching the signature keeps the two
+        retrievers interchangeable behind one route, and the argument being ignored
+        here is precisely why this retriever is a development and test fixture rather
+        than something to serve multiple tenants from.
+        """
         pages: dict[str, set[int]] = {}
         for chunk in self._chunks:
             if chunk.page is not None:

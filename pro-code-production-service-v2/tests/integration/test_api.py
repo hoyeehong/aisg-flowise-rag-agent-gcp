@@ -26,6 +26,7 @@ def settings() -> Settings:
     # An in-process harness: the in-memory retriever and saver are the intent here, so
     # the durability check is switched off rather than left to fail.
     return Settings(
+        allow_anonymous_tenant=True,
         groq_api_key="test-key",
         model_chain="primary,secondary",
         max_revisions=2,
@@ -71,6 +72,7 @@ async def test_liveness_stays_ok_while_readiness_drains(retriever, no_sleep):
     correct response. So /healthz stays 200 while /readyz answers 503.
     """
     cfg = Settings(
+        allow_anonymous_tenant=True,
         groq_api_key="",  # missing credential: unservable, but the process is fine
         model_chain="primary",
         use_in_memory_retriever=True,
@@ -101,6 +103,10 @@ async def test_readyz_reports_each_check(client):
         "graph_compiled": True,
         "retriever_ready": True,
         "model_credentials": True,
+        # Anonymous single-tenant operation is opted into by this harness, so tenant
+        # resolution is usable. Without that opt-in the check is False and readiness
+        # degrades -- see test_readyz_degrades_without_tenant_resolution.
+        "tenant_resolution": True,
     }
 
 
@@ -112,6 +118,7 @@ async def test_readyz_reports_durability_when_it_is_required(retriever, no_sleep
     them is not ready: a restart would silently discard work awaiting a reviewer.
     """
     cfg = Settings(
+        allow_anonymous_tenant=True,
         groq_api_key="k",
         model_chain="primary",
         use_in_memory_retriever=True,
@@ -139,6 +146,7 @@ async def test_readyz_reports_durability_when_it_is_required(retriever, no_sleep
 async def test_readyz_asserts_retrieval_deps_only_when_pgvector_selected(retriever, no_sleep):
     """The embedding/Postgres checks must not fire when in-memory retrieval is chosen."""
     cfg = Settings(
+        allow_anonymous_tenant=True,
         groq_api_key="k",
         model_chain="primary",
         use_in_memory_retriever=True,
@@ -163,7 +171,7 @@ async def test_readyz_asserts_retrieval_deps_only_when_pgvector_selected(retriev
 
 async def test_readyz_degrades_without_credentials(retriever, no_sleep):
     """A missing credential must fail readiness, not liveness -- no restart loop."""
-    cfg = Settings(groq_api_key="", model_chain="primary")
+    cfg = Settings(groq_api_key="", model_chain="primary", allow_anonymous_tenant=True)
     gateway = ModelGateway(
         [ModelSpec(provider="groq", model="primary")],
         {"groq": FakeProvider("groq")},
@@ -488,3 +496,167 @@ async def test_partial_failure_still_succeeds_via_fallback(settings, retriever, 
     assert r.json()["cost"]["models_used"] == ["groq/secondary"]
     assert _sample(metrics, "agent_gateway_model_retirements_total", model="groq/primary") >= 1.0
     assert _sample(metrics, "agent_gateway_fallbacks_total", model="groq/secondary") >= 1.0
+
+
+# --- authentication and tenant scoping -------------------------------------
+
+JWT_SECRET = "integration-test-signing-secret!!"  # 32 bytes, as HS256 requires
+
+
+def _bearer(tenant: str, *, secret: str = JWT_SECRET) -> dict[str, str]:
+    import time
+
+    import jwt
+
+    token = jwt.encode(
+        {"sub": f"user@{tenant}", "tenant_id": tenant, "exp": int(time.time()) + 300},
+        secret,
+        algorithm="HS256",
+    )
+    return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture
+async def enforcing_client(retriever, no_sleep):
+    """A client against a service that requires bearer tokens."""
+    cfg = Settings(
+        groq_api_key="test-key",
+        model_chain="primary,secondary",
+        max_revisions=2,
+        default_top_k=3,
+        use_in_memory_retriever=True,
+        use_postgres_checkpointer=False,
+        jwt_secret=JWT_SECRET,
+    )
+    gateway = ModelGateway(
+        [
+            ModelSpec(
+                provider="groq", model=m, usd_per_million_input=0.1, usd_per_million_output=0.5
+            )
+            for m in ("primary", "secondary")
+        ],
+        {"groq": FakeProvider("groq")},
+        policy=RetryPolicy(),
+        sleep=no_sleep,
+    )
+    app = create_app(cfg, gateway=gateway, retriever=retriever)
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            yield c
+
+
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("get", "/v1/corpus"),
+        ("post", "/v1/retrieve"),
+        ("post", "/v1/reports"),
+        ("get", "/v1/reports/anything"),
+    ],
+)
+async def test_tenant_scoped_routes_require_a_credential(enforcing_client, method, path):
+    """Every route that can reach tenant data must refuse an unauthenticated caller."""
+    # request() rather than get()/post(): httpx's get() takes no json body, and the
+    # body is irrelevant here anyway -- the dependency must refuse before the handler
+    # ever validates it.
+    r = await enforcing_client.request(
+        method.upper(), path, json={"query": "digital trust", "question": "digital trust"}
+    )
+    assert r.status_code == 401, f"{method.upper()} {path} served an anonymous caller"
+    assert r.headers.get("WWW-Authenticate") == "Bearer"
+
+
+async def test_ops_endpoints_do_not_require_a_credential(enforcing_client):
+    """
+    Probes and scrapers have no credentials, so the ops surface must stay open.
+
+    Requiring a token on /readyz would make Kubernetes mark every pod unready and the
+    deployment would never roll out -- a failure that looks like the app being broken.
+    """
+    for path in ("/healthz", "/readyz", "/metrics"):
+        r = await enforcing_client.get(path)
+        assert r.status_code != 401, f"{path} demanded a credential"
+
+
+async def test_a_valid_token_supplies_the_tenant(enforcing_client):
+    r = await enforcing_client.get("/v1/corpus", headers=_bearer("acme"))
+    assert r.status_code == 200
+    assert r.json()["tenant_id"] == "acme"
+
+
+async def test_a_token_signed_with_another_key_is_refused(enforcing_client):
+    r = await enforcing_client.get(
+        "/v1/corpus", headers=_bearer("acme", secret="a-different-secret-of-32-bytes!!!")
+    )
+    assert r.status_code == 401
+
+
+async def test_a_run_is_invisible_to_another_tenant(enforcing_client):
+    """
+    Cross-tenant read returns 404, not 403.
+
+    403 confirms the run exists, which is itself a leak: an attacker enumerating thread
+    ids learns which ones are real. This check is application-level -- the LangGraph
+    checkpoint tables carry no tenant column and are not covered by the RLS policy on
+    `chunks`, which the README states as a limitation rather than implying otherwise.
+    """
+    created = await enforcing_client.post(
+        "/v1/reports", json={"question": "Summarise digital trust"}, headers=_bearer("acme")
+    )
+    assert created.status_code == 202
+    thread_id = created.json()["thread_id"]
+
+    mine = await enforcing_client.get(f"/v1/reports/{thread_id}", headers=_bearer("acme"))
+    assert mine.status_code == 200
+
+    theirs = await enforcing_client.get(f"/v1/reports/{thread_id}", headers=_bearer("other-corp"))
+    assert theirs.status_code == 404, "a run leaked across tenants"
+
+
+async def test_another_tenant_cannot_review_someone_elses_run(enforcing_client):
+    """Ownership must gate writes too, not only reads."""
+    created = await enforcing_client.post(
+        "/v1/reports", json={"question": "Summarise digital talent"}, headers=_bearer("acme")
+    )
+    thread_id = created.json()["thread_id"]
+    r = await enforcing_client.post(
+        f"/v1/reports/{thread_id}/review",
+        json={"action": "approve", "feedback": ""},
+        headers=_bearer("other-corp"),
+    )
+    assert r.status_code == 404
+
+
+async def test_readyz_degrades_without_tenant_resolution(retriever, no_sleep):
+    """
+    No secret and no anonymous opt-in is an incomplete deployment, and readiness says so.
+
+    This is the check that turns a silent misconfiguration into a failed rollout: a
+    service that cannot establish who is asking would otherwise happily serve the
+    configured tenant's data to anyone who found the URL.
+    """
+    cfg = Settings(
+        groq_api_key="k",
+        model_chain="primary",
+        use_in_memory_retriever=True,
+        use_postgres_checkpointer=False,
+    )
+    gateway = ModelGateway(
+        [ModelSpec(provider="groq", model="primary")],
+        {"groq": FakeProvider("groq")},
+        sleep=no_sleep,
+    )
+    app = create_app(cfg, gateway=gateway, retriever=retriever)
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            response = await c.get("/readyz")
+            scoped = await c.get("/v1/corpus")
+
+    assert response.status_code == 503
+    assert response.json()["checks"]["tenant_resolution"] is False
+    assert "tenant_resolution" in response.json()["detail"]
+    # And the route refuses rather than serving the configured tenant to an anonymous
+    # caller: 503 because the deployment is incomplete, not because the caller erred.
+    assert scoped.status_code == 503

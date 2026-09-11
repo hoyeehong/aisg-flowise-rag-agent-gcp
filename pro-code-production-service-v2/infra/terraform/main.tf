@@ -16,6 +16,7 @@ locals {
     "iam.googleapis.com",
     "monitoring.googleapis.com",
     "cloudtrace.googleapis.com",
+    "pubsub.googleapis.com",
   ]
 }
 

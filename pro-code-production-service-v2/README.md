@@ -1,11 +1,11 @@
 # v2 — Pro-Code Production Service
 
-**Status:** Phases 1–4 delivered — the service runs on pgvector hybrid retrieval with a
-durable review gate, exports Prometheus metrics and OpenTelemetry traces, ships a
-schema-validated Helm chart and validated Terraform, is `mypy --strict` clean, and is
-covered by 165 tests with a retrieval eval gating every pull request. Phase 5 remains
-design-stage; the naming conventions below were fixed first so the code landed in the
-right shape rather than being reorganised later.
+**Status:** Phases 1–5 delivered — the service runs on pgvector hybrid retrieval with a
+durable review gate, enforces tenant isolation in the database, resolves the tenant from
+a verified bearer token, consumes ingestion events with idempotent retry-safe processing,
+exports Prometheus metrics and OpenTelemetry traces, ships a schema-validated Helm chart
+and validated Terraform, is `mypy --strict` clean, and is covered by 272 tests with a
+retrieval eval gating every pull request.
 
 v2 re-platforms the [v1 Flowise prototype](../low-code-rapid-prototype-v1/README.md) as a
 code-owned service: a typed API over a LangGraph agent, a RAG pipeline declared in code rather
@@ -124,6 +124,174 @@ evals/golden/
 One case per line, each carrying `case_id`, `query`, `expected_sources`, `reference_answer` and
 `tags`. Datasets are append-only within a version; a changed expectation means a new `.v<n>` file,
 so a score is always attributable to an exact dataset revision.
+
+---
+
+## 5. What Phase 5 delivered
+
+### Tenant isolation is enforced by the database
+
+Isolation used to be a convention. Every query carried `WHERE tenant_id = %s`, and every
+store method defaulted the parameter to `"default"` — so a query path that forgot it did
+not fail, it silently read the default tenant, and no test noticed because in tests
+almost everything *is* `"default"`. The defaults are gone and a row-level-security policy
+on `chunks` is the boundary.
+
+**The first version of this did not work at all**, which is the part worth recording. RLS
+was enabled, `FORCE ROW LEVEL SECURITY` was set, the policy was correct — and an unscoped
+`SELECT count(*) FROM chunks` returned 299 rows. Superusers bypass policies outright, and
+`FORCE` subjects only the table *owner*. All 19 integration tests passed against that
+inert policy.
+
+So the enforcement mechanism is the role, not the `ALTER TABLE`:
+
+| connection | `enforced` | rows visible unscoped |
+| --- | --- | --- |
+| superuser | `false` | 301 |
+| `agent_app` | `true` | 0 |
+
+`isolation_status()` **measures** enforcement — it runs an unscoped count and requires
+zero rows — rather than reporting configuration and leaving the reader to infer. `/readyz`
+surfaces it, so a deployment where the policy is inert fails readiness instead of looking
+healthy. That check is also what makes the managed-Postgres path safe: Cloud SQL's
+administrative user is not a true superuser and cannot clear `BYPASSRLS`, so bootstrap
+logs a warning and carries on, and the measurement decides the verdict rather than an
+attribute we hoped we had set.
+
+The tenant reaches Postgres through `set_config('app.tenant_id', …, is_local => true)`,
+scoped to a transaction. The store opens a connection per call today, so a session-scoped
+`SET` would work — and would leak the previous request's tenant onto a recycled
+connection the moment a pool is introduced.
+
+### The tenant comes from a verified credential
+
+RLS enforces faithfully against whatever identifier it is handed, so a tenant read from a
+header or body is enforced just as faithfully. `TenantResolver` has three modes: `jwt`
+(a signing secret is configured), `anonymous` (no secret, explicit opt-in, single-tenant —
+local and CI), and `unconfigured`, which refuses tenant-scoped requests with 503 and
+degrades `/readyz`. The default is `unconfigured`: 24 existing tests failed until the
+harness opted in, which is how the wiring was confirmed.
+
+Decisions worth naming, each with a test:
+
+* The algorithm is an allowlist; the token's own `alg` header is never trusted. A test
+  mints an `alg: none` token and asserts rejection.
+* `exp` is required — a token without one is a permanent credential.
+* HMAC secrets shorter than the hash output are **refused at startup**. RFC 7518 §3.2
+  makes this a MUST and PyJWT only warns; a 16-byte secret verifies tokens perfectly
+  until someone recovers it offline from one captured token, which makes every other
+  check here decorative.
+* 401 with the RFC 6750 challenge for a bad credential, 403 for a valid credential
+  carrying no usable tenant, and the invalid-token message does not distinguish "bad
+  signature" from "malformed".
+* RS256/JWKS is rejected at startup rather than half-implemented.
+
+Per-request tenancy is threaded through `RetrievalRequest`, the graph state and
+`ReportService`, because one retriever instance serves every request. Runs record their
+tenant and reads verify ownership, returning **404 rather than 403** so enumerating thread
+ids reveals nothing.
+
+### Event-driven ingestion
+
+Exactly-once delivery is not on offer; at-least-once with idempotent effects is.
+`MessageConsumer` owns acknowledgement and retry, `DocumentIngestionHandler` owns what a
+message means, and the broker sits behind a four-method protocol so the tests drive real
+redelivery through an in-memory broker rather than mocking the rules they check. Each rule
+has a test that fails without it:
+
+* Ack **last**, after the handler returns. Acking first turns a crash mid-handler into
+  silent data loss.
+* Bounded retries, then dead-letter and ack. Unbounded redelivery blocks a partition.
+* `PermanentMessageError` skips retrying — malformed JSON will not parse on the fourth
+  delivery either.
+* No sink, or a failing sink, means nack and never ack. Endless redelivery is visible;
+  a dropped payload is not.
+* Bounded concurrency, because the embedding provider rate-limits and letting the broker
+  set the fan-out turns a backlog into a wall of 429s.
+
+Hashing now happens **before** embedding. Content hashing already made storage idempotent,
+but the hash was computed at insert time, so a redelivered document embedded every chunk
+and then upserted to no effect — a recurring bill under at-least-once delivery. A test
+counts embedded texts across a redelivery and requires zero growth.
+
+Run it with `python -m digital_economy_agent.messaging`. It refuses to start without a
+subscription or embedding credentials rather than idling in a ready-looking process, and
+serves `/healthz`, `/readyz` and `/metrics` on its own port — readiness reports whether
+the poll loop is actually running, so a pod whose consumer task died cannot sit in the
+Service endpoints looking healthy while draining nothing.
+
+### An eval that is finally reproducible
+
+Chasing a 0.580 → 0.560 shift in retrieval recall found a defect that predates this phase.
+`ts_rank_cd` gives most matches the same score — 13–14 of any top 20 — and with
+`ORDER BY rank DESC` alone Postgres returned tied rows in physical scan order. The same
+corpus ingested into two tenants ranked differently in **9 of 10** golden cases, RRF fused
+those unstable ranks, and recall followed. The metric was never a fixed property of the
+retriever; CI reproduced 0.580 twice because each run built an identical single-tenant
+heap.
+
+Adding `source, page, content_hash` to the sort makes it deterministic: lexical ordering
+now matches across tenants in 10 of 10 cases and the full hybrid path in 10 of 10. The
+baseline was regenerated — not to cover a regression, but because the old figure was one
+sample of a measurement with no stable value. macOS/aarch64 and Ubuntu/x86_64 now agree to
+four decimal places on all six metrics, which is what the previous baseline only appeared
+to be.
+
+Applied to the lexical half only: extra sort keys after the vector distance would stop the
+HNSW index being usable, and float distances essentially never tie — verified, vector
+search already agreed across tenants, exact and approximate alike.
+
+### Deployment
+
+A second Helm workload rather than a thread in the API: the two scale on different signals
+— the API on request latency, the consumer on subscription backlog — and a burst of
+ingestion should neither slow report generation nor be throttled by an HPA watching
+request rate. The deployment uses `Recreate`, because overlapping pods reprocess the same
+redelivered messages, and a 60-second termination grace period so an in-flight batch can
+finish and acknowledge on SIGTERM.
+
+Adding it forced component labels onto both workloads. The chart's base selector matched
+every pod in the release, so the API `Service` would have selected consumer pods and
+routed HTTP to a process serving only probes on a different port. CI now asserts the two
+selectors are disjoint by comparing label sets, which a `grep` cannot do.
+
+Terraform adds the topic, the subscription and the dead-letter topic. The dead-letter
+policy is not optional decoration: Pub/Sub populates `delivery_attempt` only on
+subscriptions that have one, so without it the consumer's retry ceiling never fires.
+`PubSubSubscriber` raises rather than retrying without a ceiling. The Pub/Sub *service
+agent* also gets publisher and subscriber bindings — omitting those is the usual reason a
+dead-letter policy silently does nothing.
+
+### Phase 5 limitations
+
+* **Checkpoint state is not covered by the policy.** The LangGraph checkpoint tables have
+  no tenant column, so conversation state is protected by an ownership check in
+  `ReportService` rather than by the database. Real isolation there needs either
+  tenant-prefixed thread ids with RLS over library-owned tables, or a schema per tenant.
+* **Document reconciliation is absent.** `source_updated_at` stops an older version
+  overwriting a newer one, but only for chunks whose text is unchanged: edited text
+  hashes differently, so it is inserted rather than conflicting, and a superseded
+  version's chunks accumulate alongside the current ones. Pruning "everything not in this
+  batch" is wrong while `ingest_pdf(max_pages=N)` makes partial ingestion legitimate —
+  reconciliation needs an explicit complete-document signal, and deletion is the wrong
+  direction to guess in.
+* **The Pub/Sub adapter has never run against a live broker.** Only its import guard
+  executes in CI. The mapping it performs — ack ids, delivery attempts, nack as a
+  zero-second deadline — is unverified, and it is the component most likely to be subtly
+  wrong. The emulator belongs in CI; it is not there yet.
+* **The event path's trust boundary is coarse.** The tenant comes from the message body,
+  so whoever can publish to the topic can write to any tenant they name. The
+  authorisation boundary is the topic's IAM policy; narrowing it means a topic per tenant
+  or signed events.
+* **Autoscaling for the consumer is not wired.** CPU is the wrong signal — a consumer
+  waiting on the embedding provider is idle by CPU and behind by backlog — so there is no
+  HPA rather than a misleading one. Backlog-based scaling needs KEDA or a custom metrics
+  adapter.
+* **Migrations still run at startup.** Every starting pod applies the schema, which needs
+  an ownership-carrying DSN alongside the least-privilege one. A Job that runs once per
+  release is the better shape.
+* **Helm and Terraform remain unapplied.** Both validate; neither has been deployed to a
+  cluster or a project.
 
 ---
 
@@ -559,7 +727,7 @@ Phases are unchanged from the review; the naming above is what each one lands in
 | 2 ✓ | pgvector hybrid retrieval + Prefect ingestion with PII redaction | `retrieval/`, `ingestion/` |
 | 3 ✓ | Eval harness against the live API, wired as a required PR check | `evals/` |
 | 4 ✓ | Terraform, Helm, OTel + Prometheus, Trivy/SBOM/signing | `infra/`, `charts/`, `observability/` |
-| 5 | *(optional)* Kafka/Pub-Sub consumer, tenant isolation via Postgres RLS | `ingestion/`, `api/` |
+| 5 | Pub/Sub consumer, tenant isolation via Postgres RLS | `messaging/`, `retrieval/`, `api/` |
 
 Phase 0 is deliberately scoped to v1: the published scores should be honest before any new
 architecture is built on top of them.
