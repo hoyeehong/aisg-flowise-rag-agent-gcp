@@ -12,16 +12,18 @@ subscription is an IAM binding. The `Subscriber` protocol is what makes that a
 deployment choice rather than an architectural one; a Kafka adapter implements the same
 four methods.
 
-**Unverified against a live broker.** Everything in this module is exercised only by
-its import guard. The behaviours the consumer depends on are tested against the
-in-memory broker, but the mapping performed *here* -- ack ids, delivery attempts,
-nack-as-zero-deadline -- has never run against Pub/Sub or its emulator. Treat it as
-unproven until it has; see the README limitations.
+Verified against the Pub/Sub emulator, which speaks the real protocol: the field
+mapping, acknowledgement, nack-as-zero-deadline, the delivery-attempt guard and
+dead-lettering all run in CI on every pull request. Two things the emulator cannot
+cover -- IAM, which it does not enforce, and `oldest_unacked_message_age`, which Pub/Sub
+exposes through Cloud Monitoring rather than the data plane. Neither has been exercised
+against the real service.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from .types import IncomingMessage
@@ -48,6 +50,19 @@ def _clients() -> tuple[Any, Any]:
     except ImportError as exc:  # pragma: no cover - exercised by the import-guard test
         raise ImportError(_MISSING) from exc
     return SubscriberAsyncClient, PublisherAsyncClient
+
+
+def emulator_host() -> str | None:
+    """
+    ``PUBSUB_EMULATOR_HOST`` if set, e.g. ``localhost:8085``.
+
+    The client library already routes to the emulator when this is set -- the generated
+    client builds an insecure channel for it, async transport included -- so nothing
+    here has to arrange that. It is exposed only so the entrypoint can say which broker
+    it is talking to, because "connected" and "connected to the thing you meant" are
+    different facts and only one of them is visible in a log by default.
+    """
+    return os.environ.get("PUBSUB_EMULATOR_HOST") or None
 
 
 class PubSubSubscriber:

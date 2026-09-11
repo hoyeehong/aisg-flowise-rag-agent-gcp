@@ -71,7 +71,15 @@ def build_subscriber(settings: Settings) -> tuple[Subscriber, DeadLetterSink | N
         )
     # Imported here, not at module scope: google-cloud-pubsub is an optional extra, and
     # importing it eagerly would make the whole package require it.
-    from .pubsub import PubSubDeadLetters, PubSubSubscriber
+    from .pubsub import PubSubDeadLetters, PubSubSubscriber, emulator_host
+
+    host = emulator_host()
+    if host:
+        # Said out loud because the routing is invisible otherwise: the client library
+        # silently redirects to the emulator, so a process that looks like it is
+        # draining production is draining a local fake, and the reverse mistake --
+        # expecting a fake and getting production -- is the expensive one.
+        logger.warning("PUBSUB_EMULATOR_HOST=%s -- consuming from the emulator", host)
 
     subscriber = PubSubSubscriber(settings.pubsub_subscription)
     sink: DeadLetterSink | None = None
@@ -122,6 +130,13 @@ def build_probe_app(settings: Settings, state: dict[str, Any]) -> FastAPI:
 async def _run(args: argparse.Namespace) -> int:
     settings = get_settings()
     logging.basicConfig(level=settings.log_level.upper())
+
+    if not settings.postgres_dsn:
+        # Checked before connecting. Without it psycopg falls back to a local Unix
+        # socket and the failure arrives as an OperationalError naming
+        # /var/run/postgresql/.s.PGSQL.5432 -- which describes a socket nobody
+        # configured rather than the setting that is missing.
+        raise SystemExit("no database: set AGENT_POSTGRES_DSN")
 
     # DDL and role management need ownership the query role does not have; the admin
     # DSN falls back to the app DSN when none is configured.
