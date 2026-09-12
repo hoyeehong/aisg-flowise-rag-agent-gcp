@@ -4,18 +4,21 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python: >=3.10](https://img.shields.io/badge/Python->=3.10-blue.svg)](https://www.python.org/)
 [![Package Manager: uv](https://img.shields.io/badge/managed_by-uv-DE5FE9.svg)](https://github.com/astral-sh/uv)
-[![Orchestration: Flowise](https://img.shields.io/badge/Flowise-Agentflow_v2-black)](https://flowiseai.com/)
-[![Observability: Arize AI](https://img.shields.io/badge/Observability-Arize_AI-0A58CA)](https://arize.com/)
+[![Framework: FastAPI](https://img.shields.io/badge/Framework-FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![Agents: LangGraph](https://img.shields.io/badge/Agents-LangGraph-FF6F00)](https://langchain-ai.github.io/langgraph/)
+[![Vector: pgvector](https://img.shields.io/badge/Vector_DB-Cloud_SQL_pgvector-4169E1?logo=postgresql&logoColor=white)](https://github.com/pgvector/pgvector)
+[![Orchestration: Flowise](https://img.shields.io/badge/Prototype-Flowise_Agentflow_v2-black)](https://flowiseai.com/)
 [![LLM: Groq](https://img.shields.io/badge/LLM-Groq_gpt--oss--20b-F55036)](https://groq.com/)
 [![Eval Judge: Gemini](https://img.shields.io/badge/Eval_Judge-Google_Gemini-4285F4)](https://aistudio.google.com/)
-[![Vector: text--embedding--004](https://img.shields.io/badge/Embedding-text--embedding--004-34A853)](https://ai.google.dev/)
-[![Vector Database: Pinecone](https://img.shields.io/badge/Vector_DB-Pinecone_Serverless-040404?logo=pinecone&logoColor=white)](https://www.pinecone.io/)
-[![Cloud: GCP Cloud Run](https://img.shields.io/badge/Deploy-GCP_Cloud_Run-orange)](https://cloud.google.com/run)
+[![Observability: OpenTelemetry & Prometheus](https://img.shields.io/badge/Observability-OTel_%26_Prometheus-E6522C?logo=prometheus&logoColor=white)](https://prometheus.io/)
+[![Cloud: GCP Cloud Run](https://img.shields.io/badge/Deploy-GCP_Cloud_Run-orange?logo=google-cloud&logoColor=white)](https://cloud.google.com/run)
 [![Live Demo](https://img.shields.io/badge/Live_Demo-Interactive_Chatbot-brightgreen?logo=google-cloud&logoColor=white)](https://aisg-ladp-capstone5-303326639199.asia-southeast1.run.app/chatbot/26cb92c3-305d-4ed3-a3de-11522faa362b)
 
-An end-to-end, production-oriented GenAI application demonstrating a **specialized multi-agent architecture** with **Document Store RAG**, **Human-in-the-Loop (HITL) iterative governance**, **live Arize AI observability & tracing**, **RAG Triad automated evaluation**, and **automated zero-secrets deployment to Google Cloud Run**.
+An end-to-end, production-grade GenAI application showcasing the complete engineering lifecycle from **Low-Code Rapid Prototype (v1 in Flowise)** to an enterprise **Pro-Code Production Service (v2 in FastAPI + LangGraph)**.
 
-Designed around the dense 50+ page policy report published by the **Infocomm Media Development Authority (IMDA)** and the **Tech for Good Institute**: *"From Tech for Growth to Tech for Good: Shaping the Next Phase of Southeast Asia’s Growth through the Digital Economy"*.
+Built around the dense 50+ page policy report published by the **Infocomm Media Development Authority (IMDA)** and the **Tech for Good Institute**: *"From Tech for Growth to Tech for Good: Shaping the Next Phase of Southeast Asia’s Growth through the Digital Economy"*.
+
+The system demonstrates a **specialized multi-agent architecture**, **pgvector hybrid retrieval** (dense vector + lexical FTS with RRF fusion), **Human-in-the-Loop (HITL) durable governance**, **event-driven ingestion with PII redaction**, **Postgres Row-Level Security (RLS) multi-tenancy**, **end-to-end OpenTelemetry & Prometheus observability**, and **automated CI/CD regression gating**.
 
 > [!NOTE]
 > **Upstream AISG Capstone Contribution**: This repository serves as the standalone, open-source companion and full deployment/evaluation suite for the author's capstone project merged into the official AI Singapore repository: [**AISG-AIAP/LADP-Essentials (`yeehong_ho`)**](https://github.com/AISG-AIAP/LADP-Essentials/tree/main/LADPE_Project_Phase/contributions_from_learners/yeehong_ho).
@@ -162,12 +165,12 @@ each is carried forward as a v2 requirement rather than patched in place.
 │       ├── env.example                 # Sanitized deployment configuration template
 │       ├── flowise.html                # Lightweight embeddable chat web interface
 │       └── README_DEPLOY_GCP.md        # GCP infrastructure deployment guide
-├── pro-code-production-service-v2/     # v2 — pro-code service (Phases 1–2 shipped)
-│   ├── digital_economy_agent/          # FastAPI + LangGraph, gateway, retrieval, ingestion
-│   ├── evals/                          # Golden sets, live-API harness, regression gate
+├── pro-code-production-service-v2/     # v2 — pro-code production service (Phases 1–5 delivered)
+│   ├── digital_economy_agent/          # FastAPI + LangGraph, gateway, retrieval, ingestion, messaging
+│   ├── evals/                          # Golden sets, live-API harness, PR regression gate
 │   ├── charts/                         # Helm chart: HPA, PDB, probes, ServiceMonitor
 │   ├── infra/terraform/                # Cloud Run, Cloud SQL + pgvector, Secret Manager, IAM
-│   ├── tests/                          # 165 tests: unit offline, integration on real Postgres
+│   ├── tests/                          # 272 tests: unit offline, integration on real Postgres
 │   ├── docker-compose.yml              # Local pgvector dependency
 │   ├── Dockerfile                      # Multi-stage, non-root, healthcheck
 │   ├── pyproject.toml                  # Service dependencies (separate from the v1 tooling)
@@ -177,7 +180,9 @@ each is carried forward as a v2 requirement rather than patched in place.
 ├── data/
 │   └── imda_report.pdf                 # Source corpus shared by v1 and v2
 ├── images/
-│   └── rag_retrieval_pipeline.png      # High-resolution system architecture diagram
+│   ├── rag_architecture_v1_lowcode.jpg # v1 Low-code rapid prototype architecture diagram
+│   ├── rag_architecture_v2_procode.jpg # v2 Pro-code production service architecture diagram
+│   └── rag_retrieval_pipeline.png      # Original v1 Flowise Agentflow detailed graph
 ├── main.py                             # Central project CLI entrypoint
 ├── pyproject.toml                      # Project metadata and dependencies (PEP 518/621)
 ├── uv.lock                             # Deterministic lockfile managed by uv
@@ -189,21 +194,54 @@ each is carried forward as a v2 requirement rather than patched in place.
 
 ## 🚀 Quickstart Guide
 
-This project uses [`uv`](https://github.com/astral-sh/uv) for fast, reliable Python package and environment management.
+This project uses [`uv`](https://github.com/astral-sh/uv) for fast, deterministic Python environment and dependency management.
 
-### 1. Prerequisites
-* Python `>= 3.10`
-* [uv](https://docs.astral.sh/uv/getting-started/installation/) installed (`curl -LsSf https://astral.sh/uv/install.sh | sh` or `brew install uv`)
-* [Flowise](https://flowiseai.com/) (Local via `npx flowise start` or Docker container)
+### Option A: Run the Pro-Code Production Service (v2 — Recommended)
 
-### 2. Environment Setup
-Clone the repository and synchronize dependencies:
+The v2 service provides typed REST endpoints, LangGraph stateful multi-agent execution, pgvector hybrid retrieval, and full test coverage:
+
 ```bash
-git clone https://github.com/hoyeehong/aisg-flowise-rag-agent-gcp.git
-cd aisg-flowise-rag-agent-gcp
+cd pro-code-production-service-v2
 
-# Install dependencies into an isolated virtual environment
+# 1. Install dependencies into an isolated virtual environment
+uv sync --extra dev
+
+# 2. (Optional) Launch local pgvector PostgreSQL instance
+docker compose up -d
+
+# 3. Run the full test suite (272 unit & integration tests)
+uv run pytest -q
+
+# 4. Start the FastAPI service (runs with offline defaults without API keys)
+AGENT_GROQ_API_KEY="your-groq-key" uv run uvicorn --factory \
+    digital_economy_agent.api.app:create_app --port 8080
+```
+
+Verify service liveness, readiness, and metrics:
+```bash
+curl http://localhost:8080/healthz
+curl http://localhost:8080/readyz
+curl http://localhost:8080/metrics
+```
+
+---
+
+### Option B: Run the Low-Code Prototype (v1) & Evals
+
+The v1 tier hosts the Flowise rapid prototype, interactive Jupyter analysis, and the RAG Triad evaluation runner:
+
+```bash
+# 1. Synchronize repository root environment
 uv sync
+
+# 2. Run automated RAG Triad benchmark suite
+uv run python main.py eval
+
+# 3. Launch the interactive evaluation notebook
+uv run jupyter lab low-code-rapid-prototype-v1/evals/evaluations_notebook.ipynb
+
+# 4. Deploy the Flowise container to Google Cloud Run
+bash low-code-rapid-prototype-v1/deploy/deploy_gcp.sh
 ```
 
 ---
@@ -256,8 +294,8 @@ scoring them:**
   `reference_answer`, so this measures the dataset's internal consistency.
 
 Both are dataset defects that a fixture-based harness cannot fix. Capturing the real
-retrieved chunk set requires calling the live system — Phase 3 of the
-[v2 roadmap](pro-code-production-service-v2/README.md).
+retrieved chunk set requires calling the live system — delivered in Phase 3 of the
+[v2 roadmap](pro-code-production-service-v2/README.md#5-what-phase-3-delivered) via a live-API evaluation harness and automated CI/CD PR retrieval regression gate.
 
 > [!NOTE]
 > **Superseded scores.** Earlier revisions of this README quoted a passing scorecard
@@ -354,42 +392,54 @@ uv run jupyter lab low-code-rapid-prototype-v1/evals/evaluations_notebook.ipynb
 
 ---
 
-## 🔭 Observability, Tracing & Production Engineering (Arize AI)
+## 🔭 Observability, Tracing & Production Engineering
 
-Monitoring complex agentic workflows in production requires granular visibility into node transitions, vector retrieval quality, and LLM reasoning steps.
+Monitoring complex multi-agent workflows in production requires granular visibility into node transitions, vector retrieval quality, LLM token economics, and error propagation.
 
-### Arize AI Integration via Deployed Flowise Interface
-In the production deployment on **Google Cloud Run**, observability is enabled natively via the Flowise UI (**Configuration / Settings $\rightarrow$ Analytics $\rightarrow$ Arize AI / OpenInference**):
+### Tier 2: OpenTelemetry & Prometheus Exposition (Production Service)
+The v2 production service exports native telemetry and scrapable metrics directly:
+* **Prometheus Metrics (`GET /metrics`):**
+  * `agent_llm_cost_usd_total` & `agent_llm_calls_total{node="..."}`: Fine-grained cost and call accounting metered per model *and* per graph node (`research`, `write_draft`, `revise`).
+  * `http_request_duration_seconds`: Request latency histogram with buckets scaled up to 60s to capture multi-agent reasoning without clipping into `+Inf`.
+  * `agent_retrieval_chunks_total` & `agent_retrieval_empty_total`: Tracks chunk yields and monitors empty-retrieval edge cases.
+* **OpenTelemetry Distributed Spans:**
+  * Context-propagated spans for `retrieval`, `write_draft`, and `revise` decorated with prompt versions, chunk counts, and token counts.
+  * Explicit opt-in (`OTEL_EXPORTER_OTLP_ENDPOINT`) ensures missing sidecars never penalize production latency, and trapped errors set span error statuses rather than silently reporting success.
 
-* **OpenTelemetry & OpenInference Telemetry:** Every execution event emits standardized traces into the Arize platform:
-  * **Span 1 (`startAgentflow`):** Prompt ingestion, session metadata, and user query timestamp.
-  * **Span 2 (`agentAgentflow` / RAG Tool):** Embedding conversion with `text-embedding-004`, top-K retrieved chunk similarity scores, retrieved context payload, and retrieval latency.
-  * **Span 3 (`llmAgentflow`):** Writer Agent reasoning step, prompt/completion token consumption, temperature parameters, and execution latency.
-  * **Span 4 (`humanInputAgentflow` & `loopAgentflow`):** Human-in-the-Loop approval/revision events, user critique payload, and multi-turn iteration counters.
-
-### Production Observability Capabilities with Arize:
-1. **RAG Retrieval Quality & Semantic Drift:** Continuously inspects whether retrieved context chunks remain tightly aligned with policy queries over time.
-2. **Multi-Agent Cost & Token Tracking:** Monitors token consumption broken down by agent role (Research vs Writer) across successive HITL feedback loops.
-3. **Continuous Groundedness & Hallucination Guardrails:** Correlates production trace inputs against generated answers to identify hallucinated citations or ungrounded claims in real time.
+### Tier 1: Arize AI via Deployed Flowise Interface (Prototype)
+In the v1 Cloud Run deployment, observability is configured natively in Flowise (**Configuration $\rightarrow$ Analytics $\rightarrow$ Arize AI / OpenInference**):
+* **OpenInference Tracing:** Emits traces across four execution stages:
+  * **Span 1 (`startAgentflow`):** Prompt ingestion and user session timestamp.
+  * **Span 2 (`agentAgentflow` / RAG Tool):** `text-embedding-004` query vectorization, top-K chunk similarity scores, and retrieval latency.
+  * **Span 3 (`llmAgentflow`):** Reasoning step, prompt/completion token consumption, and model latency.
+  * **Span 4 (`humanInputAgentflow` & `loopAgentflow`):** Human review approval/revision events and feedback iteration counters.
 
 ---
 
-## ☁️ Cloud Deployment (Google Cloud Run)
+## ☁️ Cloud Deployment & Infrastructure
 
-The [`low-code-rapid-prototype-v1/deploy/`](low-code-rapid-prototype-v1/deploy/) directory provides a production deployment setup for Google Cloud Platform (`asia-southeast1`):
+This repository provides deployment blueprints for both rapid prototyping and enterprise infrastructure-as-code:
 
-* **Secrets via Secret Manager:** Model API keys *and the Flowise admin password* are injected at startup from **Google Secret Manager**. (Before Phase 0 the admin password was passed via `--set-env-vars`, which is readable through `gcloud run services describe` and Cloud Audit Logs.)
-* **Least-privilege IAM:** The service runs as a dedicated service account with per-secret `secretAccessor` bindings and bucket-scoped `objectAdmin` — not the shared default compute SA, and with no project-level grants.
-* **Persistent Storage:** Cloud Run integrates a **Google Cloud Storage (GCS) FUSE** mount (`gs://flowise-data-<PROJECT_ID>`) to persist Flowise SQLite databases, sessions, and document stores across restarts.
-* **Cost Efficiency:** Automated scale-to-zero (`min-instances: 0`).
-* **Single-writer constraint:** `max-instances` defaults to **1**. Flowise persists to SQLite on a GCS FUSE mount, and FUSE does not provide the POSIX advisory locking SQLite requires — concurrent writers risk database corruption. Raising the ceiling requires migrating to Postgres (Cloud SQL) first.
+### Tier 2: Enterprise IaC (Terraform & Helm)
+The v2 production service ships declarative infrastructure and container hardening:
+* **Terraform Infrastructure (`infra/terraform/`):**
+  * **Cloud Run:** Dedicated least-privilege runtime service account with per-secret `secretAccessor` IAM bindings.
+  * **Cloud SQL PostgreSQL 17:** Managed instance with `cloudsql.enable_pgvector` flag enabled, private IP connectivity, and deletion protection.
+  * **Google Cloud Pub/Sub:** Ingestion document topic, subscription with dead-letter retry ceiling (max 5 delivery attempts, 10s–600s backoff), and dead-letter topic.
+  * **Artifact Registry:** Immutable tags enabled to prevent tag repointing after scanning.
+* **Schema-Validated Helm Chart (`charts/digital-economy-agent/`):**
+  * Validated with `kubeconform` in strict mode against Kubernetes 1.30.
+  * Includes Horizontal Pod Autoscaler (HPA), Pod Disruption Budget (PDB), Prometheus `ServiceMonitor`, resource requests/limits, non-root security context, and `/healthz` (liveness) vs `/readyz` (readiness) probe semantics.
+* **Supply Chain Security:** Multi-stage non-root Dockerfile (zero fixable HIGH/CRITICAL CVEs via Trivy), SPDX 2.3 SBOM generated via Syft, and Cosign keyless image signing by digest.
 
-### Deploy in One Command:
+### Tier 1: Zero-Secrets Cloud Run Deployment (Flowise Container)
+The [`low-code-rapid-prototype-v1/deploy/`](low-code-rapid-prototype-v1/deploy/) directory provides a turnkey Cloud Run setup for the prototype:
+* **Secrets via Secret Manager:** Model API keys and the Flowise admin password are mounted from Google Secret Manager rather than passed in plaintext environment variables.
+* **Persistent GCS FUSE Storage:** Mounts `gs://flowise-data-<PROJECT_ID>` to persist Flowise SQLite databases across container restarts.
+* **Single-Writer Safety:** Defaults `max-instances: 1` to prevent SQLite corruption over GCS FUSE (which lacks POSIX advisory file locking).
+
 ```bash
-# Optional: copy configuration template
-cp low-code-rapid-prototype-v1/deploy/env.example low-code-rapid-prototype-v1/deploy/.env
-
-# Execute deployment
+# Deploy Flowise prototype to Cloud Run in one command:
 bash low-code-rapid-prototype-v1/deploy/deploy_gcp.sh
 ```
 
