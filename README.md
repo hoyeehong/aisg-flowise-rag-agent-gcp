@@ -36,14 +36,32 @@ Experience the autonomous research agent in action without installing anything:
 
 ---
 
-## 🏛️ System Architecture
+## 🏛️ System Architecture & Progression
+
+This repository demonstrates the complete architectural evolution of an enterprise multi-agent RAG application, organized into two deliberately separate tiers:
+
+### Tier 2: Pro-Code Production Service (Flagship)
+> **FastAPI · LangGraph · Cloud SQL pgvector · Cloud Pub/Sub · Postgres RLS Multi-Tenancy**
 
 <p align="center">
-  <img src="images/rag_retrieval_pipeline.png" alt="Multi-Agent RAG System Architecture with Arize AI Observability" width="100%"/>
+  <img src="images/rag_architecture_v2_procode.jpg" alt="Pro-Code Production Service (v2) Architecture" width="100%"/>
+</p>
+
+* **Ingestion Pipeline (Offline & Event-Driven):** `pypdf` page-aware parsing $\rightarrow$ Presidio PII redaction $\rightarrow$ 1000-char chunking with SHA-256 pre-hash $\rightarrow$ normalized `gemini-embedding-001` (768-dim) $\rightarrow$ Cloud SQL pgvector (HNSW cosine + GIN `tsvector` lexical).
+* **Query Pipeline (Online):** FastAPI + JWT Bearer tenant resolution $\rightarrow$ Dual-engine hybrid search $\rightarrow$ Reciprocal Rank Fusion (RRF $k=60$) & Lexical MMR ($\lambda=0.7$) $\rightarrow$ LangGraph StateGraph (Research + Writer nodes) with Model Gateway $\rightarrow$ Durable `AsyncPostgresSaver` review gate $\rightarrow$ Grounded SSE streaming report with citations `[p.XX]`.
+* **Governance & Platform:** Database-enforced Postgres Row-Level Security (`agent_app` role), OpenTelemetry spans + Prometheus exposition `/metrics`, and PR retrieval evaluation gating.
+
+---
+
+### Tier 1: Low-Code Rapid Prototype (Validation Baseline)
+> **Flowise Agentflow v2 · Pinecone Serverless · Groq gpt-oss-20b · Arize AI Observability**
+
+<p align="center">
+  <img src="images/rag_architecture_v1_lowcode.jpg" alt="Low-Code Rapid Prototype (v1) Architecture" width="100%"/>
 </p>
 
 <details>
-<summary><b>View Mermaid Diagram Source</b></summary>
+<summary><b>View Low-Code Prototype (v1) Details & Mermaid Graph</b></summary>
 
 ```mermaid
 graph TD
@@ -88,7 +106,6 @@ graph TD
     WriterAgent -.->|Trace Span| SpanLLM
     HITL -.->|Trace Span| SpanHITL
 ```
-</details>
 
 > [!NOTE]
 > **Model roles.** The agents run on **Groq `openai/gpt-oss-20b`** (temperature 0.3), as
@@ -98,6 +115,8 @@ graph TD
 > shows when grading its own output. Embedding configuration (`text-embedding-004`) lives
 > in Flowise Document Store server state and is not verifiable from this repository; see
 > [v1 limitations](low-code-rapid-prototype-v1/README.md#known-limitations-of-this-tier).
+
+</details>
 
 ### Key Architectural Highlights
 * **Specialized Separation of Concerns:**
@@ -117,7 +136,7 @@ This repository is organised into two deliberately separate tiers:
 | Tier | Folder | Status | Purpose |
 | :--- | :--- | :--- | :--- |
 | **v1 — Low-code rapid prototype** | [`low-code-rapid-prototype-v1/`](low-code-rapid-prototype-v1/) | Shipped, live | Flowise Agentflow v2 graph that validated the multi-agent + HITL approach in days. Frozen for feature work; retained as the demo surface and behavioural baseline. |
-| **v2 — Pro-code production service** | [`pro-code-production-service-v2/`](pro-code-production-service-v2/) | Phases 1–4 shipped | FastAPI service over a LangGraph agent: pgvector hybrid retrieval (vector + lexical, RRF-fused), idempotent ingestion with PII redaction, a durable Postgres-backed review gate, a model gateway with fallback and cost metering, versioned prompts, an evaluation harness gating retrieval quality on every PR, Prometheus metrics and OTel tracing, a schema-validated Helm chart, validated Terraform, SBOM and keyless image signing, 165 tests and `mypy --strict`. Phase 5 in design. |
+| **v2 — Pro-code production service** | [`pro-code-production-service-v2/`](pro-code-production-service-v2/) | Phases 1–5 delivered | FastAPI service over a LangGraph agent: pgvector hybrid retrieval (vector + lexical, RRF-fused), idempotent ingestion with PII redaction, a durable Postgres-backed review gate, a model gateway with fallback and cost metering, versioned prompts, an evaluation harness gating retrieval quality on every PR, Prometheus metrics and OTel tracing, a schema-validated Helm chart, validated Terraform, SBOM and keyless image signing, 272 tests and `mypy --strict`. |
 
 The v1 folder documents its own [known limitations](low-code-rapid-prototype-v1/README.md#known-limitations-of-this-tier);
 each is carried forward as a v2 requirement rather than patched in place.

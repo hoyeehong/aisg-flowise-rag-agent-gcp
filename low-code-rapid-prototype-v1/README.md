@@ -7,6 +7,19 @@ This tier exists to answer one question fast: *does a multi-agent research → w
 loop produce useful policy analysis over the IMDA SEA digital economy report?* It answered yes in
 days rather than weeks, which is exactly what a low-code surface is for.
 
+## 🏛️ System Architecture
+
+<p align="center">
+  <img src="../images/rag_architecture_v1_lowcode.jpg" alt="v1 Low-Code Rapid Prototype Architecture" width="100%"/>
+</p>
+
+### Pipeline Overview
+* **Ingestion Pipeline (Offline - Flowise Document Store):** IMDA 50+ page policy report $\rightarrow$ Flowise PDF loader $\rightarrow$ Recursive Character Splitter $\rightarrow$ `text-embedding-004` (768-dim) $\rightarrow$ Pinecone Serverless vector database (`imda-sea-report`).
+* **Query Pipeline (Online - Flowise Agentflow v2):** Flowise Chatbot UI $\rightarrow$ Query embedding $\rightarrow$ Pinecone vector retrieval tool $\rightarrow$ Research Specialist Agent (Groq `gpt-oss-20b`) $\rightarrow$ Policy Writer Agent (Groq `gpt-oss-20b`) $\rightarrow$ Human-in-the-Loop review gate (Approve vs Loop node with memory) $\rightarrow$ Publication-grade mini-report.
+* **Observability & Evaluation:** Real-time Arize AI tracing (OpenInference) on Cloud Run + offline RAG Triad evaluation runner judged by Gemini Flash.
+
+---
+
 ## What's here
 
 | Path | Role |

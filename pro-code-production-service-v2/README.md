@@ -15,6 +15,19 @@ where appropriate*.
 
 ---
 
+## 🏛️ System Architecture
+
+<p align="center">
+  <img src="../images/rag_architecture_v2_procode.jpg" alt="v2 Pro-Code Production Service Architecture" width="100%"/>
+</p>
+
+### Pipeline Overview
+* **Ingestion Pipeline (Offline & Event-Driven):** `pypdf` page-aware parsing $\rightarrow$ Presidio & Rule PII redaction $\rightarrow$ 1000-char chunking with SHA-256 pre-hash $\rightarrow$ normalized `gemini-embedding-001` (768-dim) $\rightarrow$ Cloud SQL pgvector (HNSW cosine + GIN `tsvector` lexical) with Postgres Row-Level Security (RLS) and `ON CONFLICT` atomic upserts.
+* **Query Pipeline (Online):** FastAPI + RFC 7518 JWT Bearer tenant resolution $\rightarrow$ Dual-engine hybrid search $\rightarrow$ Reciprocal Rank Fusion (RRF $k=60$) & Lexical MMR ($\lambda=0.7$) $\rightarrow$ LangGraph StateGraph (Research + Writer nodes) with Model Gateway $\rightarrow$ Durable `AsyncPostgresSaver` review gate $\rightarrow$ Grounded SSE streaming report with citations `[p.XX]`.
+* **Enterprise Governance & Platform:** Database-enforced Postgres Row-Level Security (`agent_app` role), OpenTelemetry spans + Prometheus exposition `/metrics`, and PR retrieval evaluation gating.
+
+---
+
 ## 1. Naming the tier itself
 
 v1 is named `[approach]-[maturity]-v[n]`. Keeping that construction makes the progression readable
